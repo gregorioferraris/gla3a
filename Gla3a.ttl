@@ -1,1 +1,104 @@
+@prefix doap:  <http://usefulinc.com/ns/doap#> .
+@prefix lv2:   <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix units: <http://lv2plug.in/ns/extensions/units#> .
+@prefix pprops: <http://lv2plug.in/ns/ext/port-props#> .
+@prefix ui:    <http://lv2plug.in/ns/extensions/ui#> .
 
+# URI del Plugin (DEVE CORRISPONDERE A QUELLO IN gla2a.cpp E ESSERE UNICO!)
+<http://moddevices.com/plugins/mod-devel/gla2a>
+    a lv2:Plugin ;
+    lv2:optionalFeature lv2:hardRTCapable ;
+    lv2:requiredFeature lv2:isControllable ;
+    doap:name "GLA2A Compressor (J-FET)" ; # Nome visualizzato nella DAW
+    doap:developer [
+        rdfs:label "Il tuo nome" ;
+        foaf:mbox <mailto:tua.email@example.com> ;
+    ] ;
+    doap:maintainer [
+        rdfs:label "Il tuo nome" ;
+        foaf:mbox <mailto:tua.email@example.com> ;
+    ] ;
+    lv2:port [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 0 ;
+        lv2:symbol "input" ;
+        lv2:name "Input Gain" ;
+        lv2:default 0.5 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 1.0 ;
+        units:unit units:db ;
+    ] , [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 1 ;
+        lv2:symbol "threshold" ;
+        lv2:name "Threshold" ;
+        lv2:default 0.5 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 1.0 ;
+        units:unit units:db ;
+    ] , [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 2 ;
+        lv2:symbol "ratio" ;
+        lv2:name "Ratio" ;
+        lv2:default 2.0 ;
+        lv2:minimum 1.0 ;
+        lv2:maximum 10.0 ;
+    ] , [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 3 ;
+        lv2:symbol "attack" ;
+        lv2:name "Attack" ;
+        lv2:default 10.0 ;
+        lv2:minimum 1.0 ;
+        lv2:maximum 500.0 ;
+        units:unit units:ms ;
+    ] , [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 4 ;
+        lv2:symbol "release" ;
+        lv2:name "Release" ;
+        lv2:default 200.0 ;
+        lv2:minimum 10.0 ;
+        lv2:maximum 2000.0 ;
+        units:unit units:ms ;
+    ] , [
+        # NUOVA PORTA: J-FET Drive
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 5 ; # Assicurati che l'indice sia consecutivo e non in conflitto!
+        lv2:symbol "jfet_drive" ;
+        lv2:name "J-FET Drive" ;
+        lv2:default 1.0 ;
+        lv2:minimum 0.1 ;
+        lv2:maximum 5.0 ;
+    ] , [
+        # NUOVA PORTA: J-FET Output
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 6 ; # Assicurati che l'indice sia consecutivo e non in conflitto!
+        lv2:symbol "jfet_output" ;
+        lv2:name "J-FET Output" ;
+        lv2:default 1.0 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 2.0 ;
+        units:unit units:db ; # Puoi anche definire in dB se preferisci
+    ] , [
+        a lv2:InputPort ,
+            lv2:AudioPort ;
+        lv2:index 7 ;
+        lv2:symbol "audio_in" ;
+        lv2:name "Audio In" ;
+    ] , [
+        a lv2:OutputPort ,
+            lv2:AudioPort ;
+        lv2:index 8 ;
+        lv2:symbol "audio_out" ;
+        lv2:name "Audio Out" ;
+    ] .
