@@ -1,28 +1,32 @@
-#include <cmath> // Per funzioni matematiche come tanh o exp
+#include <cmath> // Per funzioni matematiche come sqrt, pow, fabs
 #include <lv2/core/lv2.h>
 #include <lv2/atom/atom.h>
 #include <lv2/atom/forge.h>
 #include <lv2/urid/urid.h>
-#include <lv2/midi/midi.h> // Se usi MIDI per UI
+#include <lv2/midi/midi.h>
 #include <lv2/log/log.h>
 #include <lv2/log/logger.h>
 #include <lv2/time/time.h>
 #include <lv2/units/units.h>
 
-// Definizione dell'URI del plugin (ASSICURATI CHE SIA UNICO!)
-#define GLA2A_URI "http://moddevices.com/plugins/mod-devel/gla2a"
+// Definizione dell'URI del plugin (assicurati che sia unico!)
+// Se questo è il progetto gla3a.cpp, dovrebbe avere un URI diverso da gla2a
+#define GLA3A_URI "http://moddevices.com/plugins/mod-devel/gla3a" 
 
 // Struttura per i dati del plugin
 typedef struct {
-    // Porta di controllo
-    float* drive;   // Nuovo parametro: Input Drive per il J-FET
-    float* output;  // Nuovo parametro: Output Level del J-FET
-    float* input;
+    // Porta di controllo (ora con i nuovi parametri J-FET)
+    float* drive;   // Guadagno in ingresso allo stadio J-FET
+    float* vp;      // Tensione di Pinch-off J-FET (es. -0.5V a -5V)
+    float* idss;    // Corrente di saturazione a Vgs=0 (es. 0.001 a 0.02)
+    float* output;  // Livello di uscita dello stadio J-FET
+
+    float* input_gain; // Rinomino per chiarezza, era solo 'input'
     float* threshold;
     float* ratio;
     float* attack;
     float* release;
-    float* tubeDrive; // Rimuovere o commentare se non usato
+    // float* tubeDrive; // Rimuovere o commentare se non usato
 
     // Porte audio
     const float* audio_in;
@@ -36,29 +40,50 @@ typedef struct {
     // Logger per debug
     LV2_Log_Logger logger;
 
-} GLA2A;
+} GLA3A; // Aggiornato a GLA3A
 
-// Funzione di utilità per la non linearità J-FET (curva di saturazione)
-// Questa è una semplice approssimazione sigmoide, puoi sperimentare.
-static inline float jfet_transfer(float input, float drive) {
-    // 'drive' controlla la forza della saturazione.
-    // Un valore di drive più alto comprime e satura di più.
-    // Si può usare tanh, atan, o altre funzioni non lineari.
-    return std::tanh(input * drive) / drive; // Dividere per drive per mantenere un guadagno unitario a basso input
+// --- NUOVA FUNZIONE DI TRASFERIMENTO J-FET BASATA SULLA LEGGE QUADRATICA ---
+// Simula la curva di saturazione di un J-FET.
+// input: il segnale audio in ingresso (Vgs simulato)
+// Vp: tensione di pinch-off (un parametro del J-FET, tipicamente negativo)
+// Idss: corrente di saturazione a Vgs=0 (un parametro del J-FET)
+static inline float jfet_transfer(float input, float Vp, float Idss) {
+    // La legge quadratica approssima la corrente di drain (Id) in funzione della tensione gate-source (Vgs)
+    // Id = Idss * (1 - Vgs/Vp)^2
+    // Se Vgs > 0, Id = Idss
+    // Se Vgs < Vp, Id = 0 (cut-off)
+
+    // Normalizziamo l'input per simulare Vgs.
+    // L'input qui è il nostro sample audio, lo trattiamo come Vgs.
+
+    float Vgs = input; // Il nostro sample è la tensione di gate-source
+
+    if (Vgs >= 0.0f) {
+        // Nella regione a Vgs >= 0, il J-FET è completamente aperto, la corrente è Idss.
+        // Simuliamo una leggera compressione/saturazione in questa regione usando una soft clipping.
+        // Questo è più un 'tweak' per il carattere audio.
+        return Idss * (Vgs / (Idss + fabs(Vgs))); // Esempio di soft clipping per Vgs > 0
+    } else if (Vgs < Vp) {
+        // Cut-off: nessuna corrente (o molto poca), quindi l'output è zero.
+        return 0.0f;
+    } else {
+        // Regione di saturazione (Vp <= Vgs < 0): si applica la legge quadratica.
+        float term = (1.0f - (Vgs / Vp));
+        return Idss * (term * term); // Idss * (1 - Vgs/Vp)^2
+    }
 }
+
 
 // Funzione 'instantiate'
 static LV2_Handle instantiate(const LV2_Descriptor* descriptor,
                               double rate,
                               const char* bundle_path,
                               const LV2_Feature* const* features) {
-    GLA2A* plugin = (GLA2A*)calloc(1, sizeof(GLA2A));
+    GLA3A* plugin = (GLA3A*)calloc(1, sizeof(GLA3A)); // Aggiornato a GLA3A
     plugin->sample_rate = rate;
 
-    // Inizializza il logger
     lv2_log_logger_init(&plugin->logger, features);
 
-    // Inizializza lo stato interno
     plugin->envelope = 0.0f;
     plugin->gain_reduction = 1.0f;
 
@@ -67,42 +92,50 @@ static LV2_Handle instantiate(const LV2_Descriptor* descriptor,
 
 // Funzione 'connect_port'
 static void connect_port(LV2_Handle instance, uint32_t port, void* data) {
-    GLA2A* plugin = (GLA2A*)instance;
+    GLA3A* plugin = (GLA3A*)instance; // Aggiornato a GLA3A
 
     switch (port) {
-        case 0: plugin->input = (float*)data; break;
+        // Modificato l'indice 0 a input_gain
+        case 0: plugin->input_gain = (float*)data; break;
         case 1: plugin->threshold = (float*)data; break;
         case 2: plugin->ratio = (float*)data; break;
         case 3: plugin->attack = (float*)data; break;
         case 4: plugin->release = (float*)data; break;
         // Nuovi parametri J-FET
-        case 5: plugin->drive = (float*)data; break;  // Nuova porta per Drive
-        case 6: plugin->output = (float*)data; break; // Nuova porta per Output
-        // Rimuovere o modificare l'assegnazione se tubeDrive non è più usato
-        // case X: plugin->tubeDrive = (float*)data; break; 
-        case 7: plugin->audio_in = (const float*)data; break;
-        case 8: plugin->audio_out = (float*)data; break;
+        case 5: plugin->drive = (float*)data; break;
+        case 6: plugin->vp = (float*)data; break;   // Nuova porta per Vp
+        case 7: plugin->idss = (float*)data; break; // Nuova porta per Idss
+        case 8: plugin->output = (float*)data; break;
+
+        // Le porte audio devono seguire gli indici delle porte di controllo
+        // Quindi, se hai 9 porte di controllo (0-8), le porte audio inizieranno da 9
+        case 9: plugin->audio_in = (const float*)data; break;
+        case 10: plugin->audio_out = (float*)data; break;
+        // Verifica che questi indici siano corretti in base al tuo .ttl
     }
 }
 
 // Funzione 'run' - Qui avviene l'elaborazione audio
 static void run(LV2_Handle instance, uint32_t n_samples) {
-    GLA2A* plugin = (GLA2A*)instance;
+    GLA3A* plugin = (GLA3A*)instance; // Aggiornato a GLA3A
 
-    // Puntatori ai dati delle porte
-    const float in_level = *plugin->input;
+    // Puntatori ai dati delle porte (aggiornati con nuovi nomi e parametri J-FET)
+    const float in_gain = *plugin->input_gain;
     const float threshold = *plugin->threshold;
     const float ratio = *plugin->ratio;
     const float attack_ms = *plugin->attack;
     const float release_ms = *plugin->release;
-    const float drive_jfet = *plugin->drive;     // Valore J-FET Drive
-    const float output_jfet = *plugin->output;   // Valore J-FET Output
+    
+    // Parametri J-FET
+    const float jfet_drive = *plugin->drive;
+    const float jfet_vp = *plugin->vp;
+    const float jfet_idss = *plugin->idss;
+    const float jfet_output = *plugin->output;
 
     const float* const audio_in = plugin->audio_in;
     float* const audio_out = plugin->audio_out;
 
-    // Calcola i coefficienti di attacco e rilascio in base al sample rate
-    // Nota: i tempi sono in ms, dobbiamo convertirli in un fattore per sample
+    // Calcola i coefficienti di attacco e rilascio
     float attack_coeff = 0.0f;
     if (attack_ms > 0.0f) {
         attack_coeff = expf(-1.0f / (attack_ms * 0.001f * plugin->sample_rate));
@@ -115,18 +148,17 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     for (uint32_t i = 0; i < n_samples; ++i) {
         float sample = audio_in[i];
 
-        // --- Stadio di Amplificazione J-FET (pre-compressore) ---
-        // Applica il drive J-FET al segnale in ingresso
-        if (drive_jfet > 0.001f) { // Evita divisione per zero se drive è molto basso
-            sample = jfet_transfer(sample * drive_jfet, drive_jfet);
-        }
+        // --- Guadagno di Ingresso del Plugin ---
+        sample *= in_gain;
+
+        // --- Stadio di Amplificazione J-FET ---
+        // Applica il drive J-FET al segnale in ingresso e poi la funzione di trasferimento
+        sample = jfet_transfer(sample * jfet_drive, jfet_vp, jfet_idss);
         
         // Applica il livello di output del J-FET
-        sample *= output_jfet;
+        sample *= jfet_output;
 
         // --- Sezione Compressore (esistente) ---
-        // Livello del segnale (peak detection o RMS semplificato)
-        // Usiamo il valore assoluto per la rilevazione dell'envelope
         float detection = fabsf(sample);
 
         // Aggiorna l'envelope (smoothed peak)
@@ -136,7 +168,6 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
             plugin->envelope = (release_coeff * plugin->envelope) + ((1.0f - release_coeff) * detection);
         }
 
-        // Calcola il guadagno desiderato in base a threshold e ratio
         float target_gain = 1.0f;
         if (plugin->envelope > threshold) {
             target_gain = powf(threshold / plugin->envelope, (ratio - 1.0f) / ratio);
@@ -147,17 +178,9 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     }
 }
 
-// Funzione 'deactivate'
-static void deactivate(LV2_Handle instance) {
-    // Nulla da fare qui per ora
-}
-
-// Funzione 'cleanup'
-static void cleanup(LV2_Handle instance) {
-    free(instance);
-}
-
-// Funzione 'extension_data'
+// Funzioni 'deactivate', 'cleanup', 'extension_data', 'work' (rimangono invariate)
+static void deactivate(LV2_Handle instance) {}
+static void cleanup(LV2_Handle instance) { free(instance); }
 static LV2_Worker_Status work(LV2_Handle instance,
                               LV2_Worker_Respond_Function respond,
                               LV2_Worker_Request_Function request,
@@ -166,21 +189,17 @@ static LV2_Worker_Status work(LV2_Handle instance,
                               const void* data) {
     return LV2_WORKER_SUCCESS;
 }
-
-// Funzione 'extension_data' per GUI
-static const void* extension_data(const char* uri) {
-    return NULL;
-}
+static const void* extension_data(const char* uri) { return NULL; }
 
 // Descrittore del plugin
 static const LV2_Descriptor descriptor = {
-    GLA2A_URI,
+    GLA3A_URI, // Aggiornato a GLA3A_URI
     instantiate,
     connect_port,
     run,
     deactivate,
     cleanup,
-    extension_data // Questo puntatore è per LV2_GUI_Descriptor (GUI), LV2_Worker (Thread), ecc.
+    extension_data
 };
 
 // Funzione di ingresso del plugin
