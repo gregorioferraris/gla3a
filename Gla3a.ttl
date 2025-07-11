@@ -1,211 +1,132 @@
-#include <cmath> // Per funzioni matematiche come sqrt, pow, fabs
-#include <lv2/core/lv2.h>
-#include <lv2/atom/atom.h>
-#include <lv2/atom/forge.h>
-#include <lv2/urid/urid.h>
-#include <lv2/midi/midi.h>
-#include <lv2/log/log.h>
-#include <lv2/log/logger.h>
-#include <lv2/time/time.h>
-#include <lv2/units/units.h>
+@prefix doap:  <http://usefulinc.com/ns/doap#> .
+@prefix lv2:   <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix units: <http://lv2plug.in/ns/extensions/units#> .
+@prefix pprops: <http://lv2plug.in/ns/ext/port-props#> .
+@prefix ui:    <http://lv2plug.in/ns/extensions/ui#> .
+@prefix foaf:  <http://xmlns.com/foaf/0.1/> . # Aggiunto per doap:developer/maintainer
 
-// Definizione dell'URI del plugin (assicurati che sia unico!)
-// Se questo è il progetto gla3a.cpp, dovrebbe avere un URI diverso da gla2a
-#define GLA3A_URI "http://moddevices.com/plugins/mod-devel/gla3a" 
-
-// Struttura per i dati del plugin
-typedef struct {
-    // Porta di controllo (ora con i nuovi parametri J-FET)
-    float* drive;   // Guadagno in ingresso allo stadio J-FET
-    float* vp;      // Tensione di Pinch-off J-FET (es. -0.5V a -5V)
-    float* idss;    // Corrente di saturazione a Vgs=0 (es. 0.001 a 0.02)
-    float* output;  // Livello di uscita dello stadio J-FET
-
-    float* input_gain; // Rinomino per chiarezza, era solo 'input'
-    float* threshold;
-    float* ratio;
-    float* attack;
-    float* release;
-    // float* tubeDrive; // Rimuovere o commentare se non usato
-
-    // Porte audio
-    const float* audio_in;
-    float* audio_out;
-
-    // Dati interni dello stato
-    float envelope;
-    float gain_reduction;
-    float sample_rate;
-
-    // Logger per debug
-    LV2_Log_Logger logger;
-
-} GLA3A; // Aggiornato a GLA3A
-
-// --- NUOVA FUNZIONE DI TRASFERIMENTO J-FET BASATA SULLA LEGGE QUADRATICA ---
-// Simula la curva di saturazione di un J-FET.
-// input: il segnale audio in ingresso (Vgs simulato)
-// Vp: tensione di pinch-off (un parametro del J-FET, tipicamente negativo)
-// Idss: corrente di saturazione a Vgs=0 (un parametro del J-FET)
-static inline float jfet_transfer(float input, float Vp, float Idss) {
-    // La legge quadratica approssima la corrente di drain (Id) in funzione della tensione gate-source (Vgs)
-    // Id = Idss * (1 - Vgs/Vp)^2
-    // Se Vgs > 0, Id = Idss
-    // Se Vgs < Vp, Id = 0 (cut-off)
-
-    // Normalizziamo l'input per simulare Vgs.
-    // L'input qui è il nostro sample audio, lo trattiamo come Vgs.
-
-    float Vgs = input; // Il nostro sample è la tensione di gate-source
-
-    if (Vgs >= 0.0f) {
-        // Nella regione a Vgs >= 0, il J-FET è completamente aperto, la corrente è Idss.
-        // Simuliamo una leggera compressione/saturazione in questa regione usando una soft clipping.
-        // Questo è più un 'tweak' per il carattere audio.
-        return Idss * (Vgs / (Idss + fabs(Vgs))); // Esempio di soft clipping per Vgs > 0
-    } else if (Vgs < Vp) {
-        // Cut-off: nessuna corrente (o molto poca), quindi l'output è zero.
-        return 0.0f;
-    } else {
-        // Regione di saturazione (Vp <= Vgs < 0): si applica la legge quadratica.
-        float term = (1.0f - (Vgs / Vp));
-        return Idss * (term * term); // Idss * (1 - Vgs/Vp)^2
-    }
-}
-
-
-// Funzione 'instantiate'
-static LV2_Handle instantiate(const LV2_Descriptor* descriptor,
-                              double rate,
-                              const char* bundle_path,
-                              const LV2_Feature* const* features) {
-    GLA3A* plugin = (GLA3A*)calloc(1, sizeof(GLA3A)); // Aggiornato a GLA3A
-    plugin->sample_rate = rate;
-
-    lv2_log_logger_init(&plugin->logger, features);
-
-    plugin->envelope = 0.0f;
-    plugin->gain_reduction = 1.0f;
-
-    return (LV2_Handle)plugin;
-}
-
-// Funzione 'connect_port'
-static void connect_port(LV2_Handle instance, uint32_t port, void* data) {
-    GLA3A* plugin = (GLA3A*)instance; // Aggiornato a GLA3A
-
-    switch (port) {
-        // Modificato l'indice 0 a input_gain
-        case 0: plugin->input_gain = (float*)data; break;
-        case 1: plugin->threshold = (float*)data; break;
-        case 2: plugin->ratio = (float*)data; break;
-        case 3: plugin->attack = (float*)data; break;
-        case 4: plugin->release = (float*)data; break;
-        // Nuovi parametri J-FET
-        case 5: plugin->drive = (float*)data; break;
-        case 6: plugin->vp = (float*)data; break;   // Nuova porta per Vp
-        case 7: plugin->idss = (float*)data; break; // Nuova porta per Idss
-        case 8: plugin->output = (float*)data; break;
-
-        // Le porte audio devono seguire gli indici delle porte di controllo
-        // Quindi, se hai 9 porte di controllo (0-8), le porte audio inizieranno da 9
-        case 9: plugin->audio_in = (const float*)data; break;
-        case 10: plugin->audio_out = (float*)data; break;
-        // Verifica che questi indici siano corretti in base al tuo .ttl
-    }
-}
-
-// Funzione 'run' - Qui avviene l'elaborazione audio
-static void run(LV2_Handle instance, uint32_t n_samples) {
-    GLA3A* plugin = (GLA3A*)instance; // Aggiornato a GLA3A
-
-    // Puntatori ai dati delle porte (aggiornati con nuovi nomi e parametri J-FET)
-    const float in_gain = *plugin->input_gain;
-    const float threshold = *plugin->threshold;
-    const float ratio = *plugin->ratio;
-    const float attack_ms = *plugin->attack;
-    const float release_ms = *plugin->release;
-    
-    // Parametri J-FET
-    const float jfet_drive = *plugin->drive;
-    const float jfet_vp = *plugin->vp;
-    const float jfet_idss = *plugin->idss;
-    const float jfet_output = *plugin->output;
-
-    const float* const audio_in = plugin->audio_in;
-    float* const audio_out = plugin->audio_out;
-
-    // Calcola i coefficienti di attacco e rilascio
-    float attack_coeff = 0.0f;
-    if (attack_ms > 0.0f) {
-        attack_coeff = expf(-1.0f / (attack_ms * 0.001f * plugin->sample_rate));
-    }
-    float release_coeff = 0.0f;
-    if (release_ms > 0.0f) {
-        release_coeff = expf(-1.0f / (release_ms * 0.001f * plugin->sample_rate));
-    }
-
-    for (uint32_t i = 0; i < n_samples; ++i) {
-        float sample = audio_in[i];
-
-        // --- Guadagno di Ingresso del Plugin ---
-        sample *= in_gain;
-
-        // --- Stadio di Amplificazione J-FET ---
-        // Applica il drive J-FET al segnale in ingresso e poi la funzione di trasferimento
-        sample = jfet_transfer(sample * jfet_drive, jfet_vp, jfet_idss);
-        
-        // Applica il livello di output del J-FET
-        sample *= jfet_output;
-
-        // --- Sezione Compressore (esistente) ---
-        float detection = fabsf(sample);
-
-        // Aggiorna l'envelope (smoothed peak)
-        if (detection > plugin->envelope) {
-            plugin->envelope = (attack_coeff * plugin->envelope) + ((1.0f - attack_coeff) * detection);
-        } else {
-            plugin->envelope = (release_coeff * plugin->envelope) + ((1.0f - release_coeff) * detection);
-        }
-
-        float target_gain = 1.0f;
-        if (plugin->envelope > threshold) {
-            target_gain = powf(threshold / plugin->envelope, (ratio - 1.0f) / ratio);
-        }
-
-        // Applica il guadagno al sample
-        audio_out[i] = sample * target_gain;
-    }
-}
-
-// Funzioni 'deactivate', 'cleanup', 'extension_data', 'work' (rimangono invariate)
-static void deactivate(LV2_Handle instance) {}
-static void cleanup(LV2_Handle instance) { free(instance); }
-static LV2_Worker_Status work(LV2_Handle instance,
-                              LV2_Worker_Respond_Function respond,
-                              LV2_Worker_Request_Function request,
-                              void* feature_data,
-                              uint32_t size,
-                              const void* data) {
-    return LV2_WORKER_SUCCESS;
-}
-static const void* extension_data(const char* uri) { return NULL; }
-
-// Descrittore del plugin
-static const LV2_Descriptor descriptor = {
-    GLA3A_URI, // Aggiornato a GLA3A_URI
-    instantiate,
-    connect_port,
-    run,
-    deactivate,
-    cleanup,
-    extension_data
-};
-
-// Funzione di ingresso del plugin
-LV2_Descriptor const* lv2_descriptor(uint32_t index) {
-    switch (index) {
-        case 0:  return &descriptor;
-        default: return NULL;
-    }
-}
+# URI del Plugin (DEVE CORRISPONDERE ESATTAMENTE A QUELLO IN gla3a.cpp E ESSERE UNICO!)
+<http://moddevices.com/plugins/mod-devel/gla3a>
+    a lv2:Plugin ;
+    lv2:optionalFeature lv2:hardRTCapable ;
+    lv2:requiredFeature lv2:isControllable ;
+    doap:name "GLA3A Opto Compressor (J-FET Stage)" ; # Nome visualizzato nella DAW, più specifico
+    doap:developer [
+        rdfs:label "Il tuo nome" ; # Inserisci il tuo nome
+        foaf:mbox <mailto:tua.email@example.com> ; # Inserisci la tua email
+    ] ;
+    doap:maintainer [
+        rdfs:label "Il tuo nome" ; # Inserisci il tuo nome
+        foaf:mbox <mailto:tua.email@example.com> ; # Inserisci la tua email
+    ] ;
+    lv2:port [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 0 ;
+        lv2:symbol "input_gain" ; # Simbolo della porta (deve corrispondere al C++)
+        lv2:name "Input Gain" ;  # Nome visualizzato
+        lv2:default 0.5 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 1.0 ;
+        units:unit units:db ;
+    ] , [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 1 ;
+        lv2:symbol "threshold" ;
+        lv2:name "Threshold" ;
+        lv2:default 0.5 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 1.0 ;
+        units:unit units:db ;
+    ] , [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 2 ;
+        lv2:symbol "ratio" ;
+        lv2:name "Ratio" ;
+        lv2:default 2.0 ;
+        lv2:minimum 1.0 ;
+        lv2:maximum 10.0 ;
+    ] , [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 3 ;
+        lv2:symbol "attack" ;
+        lv2:name "Attack" ;
+        lv2:default 10.0 ;
+        lv2:minimum 1.0 ;
+        lv2:maximum 500.0 ;
+        units:unit units:ms ;
+    ] , [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 4 ;
+        lv2:symbol "release" ;
+        lv2:name "Release" ;
+        lv2:default 200.0 ;
+        lv2:minimum 10.0 ;
+        lv2:maximum 2000.0 ;
+        units:unit units:ms ;
+    ] , [
+        # NUOVA PORTA: J-FET Drive (Sostituisce "Tube Drive" o "Saturation")
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 5 ; # Indice corrisponde a GLA3A::drive nel C++
+        lv2:symbol "jfet_drive" ;
+        lv2:name "J-FET Drive" ;
+        lv2:default 1.0 ;
+        lv2:minimum 0.1 ; # Minimo non zero per evitare divisione per zero in jfet_transfer, se applicabile
+        lv2:maximum 10.0 ; # Aumentato il range per più saturazione
+        rdfs:comment "Controls the input gain and non-linearity of the J-FET stage." ;
+    ] , [
+        # NUOVA PORTA: J-FET Vp (Tensione di Pinch-off)
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 6 ; # Indice corrisponde a GLA3A::vp nel C++
+        lv2:symbol "jfet_vp" ;
+        lv2:name "J-FET Pinch-off Voltage (Vp)" ;
+        lv2:default -2.0 ; # Tipico valore di Vp, è negativo
+        lv2:minimum -5.0 ; # Range per Vp
+        lv2:maximum -0.5 ;
+        units:unit units:v ; # Unità per la tensione
+        rdfs:comment "J-FET pinch-off voltage, affects compression and saturation characteristics." ;
+    ] , [
+        # NUOVA PORTA: J-FET Idss (Corrente di Saturazione a Vgs=0)
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 7 ; # Indice corrisponde a GLA3A::idss nel C++
+        lv2:symbol "jfet_idss" ;
+        lv2:name "J-FET Saturation Current (Idss)" ;
+        lv2:default 0.005 ; # Valore tipico in Ampere
+        lv2:minimum 0.0001 ;
+        lv2:maximum 0.05 ;
+        units:unit units:ma ; # Puoi usare mA se preferisci, altrimenti lasciare il valore decimale
+        rdfs:comment "J-FET drain saturation current at Vgs=0, affects overall gain and character." ;
+    ] , [
+        # NUOVA PORTA: J-FET Output (Output Level)
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 8 ; # Indice corrisponde a GLA3A::output nel C++
+        lv2:symbol "jfet_output" ;
+        lv2:name "J-FET Output" ;
+        lv2:default 1.0 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 2.0 ;
+        units:unit units:db ; # Puoi definirlo come dB o fattore lineare
+        rdfs:comment "Output gain after the J-FET stage." ;
+    ] , [
+        # Porte Audio (Indici aggiornati per seguire le nuove porte di controllo)
+        a lv2:InputPort ,
+            lv2:AudioPort ;
+        lv2:index 9 ; # L'indice 9 perché ci sono 9 porte di controllo (0-8)
+        lv2:symbol "audio_in" ;
+        lv2:name "Audio In" ;
+    ] , [
+        a lv2:OutputPort ,
+            lv2:AudioPort ;
+        lv2:index 10 ; # L'indice 10 perché ci sono 9 porte di controllo (0-8)
+        lv2:symbol "audio_out" ;
+        lv2:name "Audio Out" ;
+    ] .
