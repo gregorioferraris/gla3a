@@ -1,0 +1,20 @@
+@prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ui:   <http://lv2plug.in/ns/extensions/ui#> .
+
+# Definisci il plugin GLA3A Core
+<http://moddevices.com/plugins/mod-devel/gla3a>
+    a lv2:Plugin ;
+    rdfs:seeAlso <gla3a.ttl> ;      # Il file TTL che descrive le porte del core
+    rdfs:seeAlso <gla3a.so> ;       # La libreria compilata del plugin core
+    ui:optionalGui <http://moddevices.com/plugins/mod-devel/gla3a_ui> . # Collega alla GUI
+
+# Definisci l'interfaccia utente (GUI) di GLA3A
+<http://moddevices.com/plugins/mod-devel/gla3a_ui>
+    a ui:X11UI ;                    # Tipo di interfaccia utente (X11 per Linux)
+    ui:binary <gla3a_ui.so> ;       # La libreria compilata della GUI
+    lv2:requiredFeature <http://lv2plug.in/ns/ext/options#options> ; # Opzionale, ma buona pratica
+    lv2:requiredFeature <http://lv2plug.in/ns/ext/urid#map> ;       # Necessario per mappare URI a URID (per ImGui)
+    lv2:requiredFeature <http://lv2plug.in/ns/ext/ui#idle> ;        # Necessario per aggiornamenti in background (per ImGui)
+    lv2:extensionData <http://lv2plug.in/ns/ext/ui#noUserResize> ;   # Impedisce all'host di ridimensionare la finestra
+    rdfs:seeAlso <gla3a.ttl> .      # Riferimento al TTL del plugin per le definizioni delle porte che la GUI controllerà
