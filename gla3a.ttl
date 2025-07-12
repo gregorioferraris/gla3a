@@ -66,18 +66,7 @@
         lv2:maximum 1.0 ;
     ] , [
         a lv2:InputPort , lv2:ControlPort ;
-        lv2:index 5 ; # NUOVA PORTA
-        lv2:symbol "sidechain_hf_freq" ;
-        lv2:name "Sidechain HF Freq" ;
-        lv2:default 0.0 ;
-        lv2:minimum 0.0 ;
-        lv2:maximum 1.0 ;
-        units:unit units:hz ;
-        # Mappa 0-1 a un range di frequenze, es. 200 Hz a 10 kHz
-        # La GUI si occuperà della mappatura visiva
-    ] , [
-        a lv2:InputPort , lv2:ControlPort ;
-        lv2:index 6 ; # NUOVA PORTA
+        lv2:index 5 ;
         lv2:symbol "ratio_mode" ;
         lv2:name "Ratio Mode" ;
         lv2:default 0.0 ;
@@ -89,8 +78,60 @@
                        [ rdfs:label "9:1" ; lv2:value 2.0 ] ,
                        [ rdfs:label "Limit" ; lv2:value 3.0 ] ;
     ] , [
+        a lv2:InputPort , lv2:ControlPort ;
+        lv2:index 6 ; # NUOVO: On/Off LowPass
+        lv2:symbol "sc_lp_on" ;
+        lv2:name "SC LP On" ;
+        lv2:portProperty lv2:toggled ;
+        lv2:default 0.0 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 1.0 ;
+    ] , [
+        a lv2:InputPort , lv2:ControlPort ;
+        lv2:index 7 ; # NUOVO: Freq LowPass
+        lv2:symbol "sc_lp_freq" ;
+        lv2:name "SC LP Freq" ;
+        lv2:default 2000.0 ;
+        lv2:minimum 20.0 ;
+        lv2:maximum 20000.0 ;
+        units:unit units:hz ;
+    ] , [
+        a lv2:InputPort , lv2:ControlPort ;
+        lv2:index 8 ; # NUOVO: Q LowPass
+        lv2:symbol "sc_lp_q" ;
+        lv2:name "SC LP Q" ;
+        lv2:default 0.707 ; # Butterworth
+        lv2:minimum 0.1 ;
+        lv2:maximum 10.0 ;
+    ] , [
+        a lv2:InputPort , lv2:ControlPort ;
+        lv2:index 9 ; # NUOVO: On/Off HighPass
+        lv2:symbol "sc_hp_on" ;
+        lv2:name "SC HP On" ;
+        lv2:portProperty lv2:toggled ;
+        lv2:default 0.0 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 1.0 ;
+    ] , [
+        a lv2:InputPort , lv2:ControlPort ;
+        lv2:index 10 ; # NUOVO: Freq HighPass
+        lv2:symbol "sc_hp_freq" ;
+        lv2:name "SC HP Freq" ;
+        lv2:default 100.0 ;
+        lv2:minimum 20.0 ;
+        lv2:maximum 2000.0 ;
+        units:unit units:hz ;
+    ] , [
+        a lv2:InputPort , lv2:ControlPort ;
+        lv2:index 11 ; # NUOVO: Q HighPass
+        lv2:symbol "sc_hp_q" ;
+        lv2:name "SC HP Q" ;
+        lv2:default 0.707 ; # Butterworth
+        lv2:minimum 0.1 ;
+        lv2:maximum 10.0 ;
+    ] , [
         a lv2:OutputPort , lv2:ControlPort ;
-        lv2:index 7 ;
+        lv2:index 12 ;
         lv2:symbol "output_rms" ;
         lv2:name "Output RMS" ;
         lv2:designation units:db ;
@@ -100,7 +141,7 @@
         lv2:portProperty lv2:notOnGUI ;
     ] , [
         a lv2:OutputPort , lv2:ControlPort ;
-        lv2:index 8 ;
+        lv2:index 13 ;
         lv2:symbol "gain_reduction_meter" ;
         lv2:name "Gain Reduction Meter" ;
         lv2:designation units:db ;
@@ -110,22 +151,22 @@
         lv2:portProperty lv2:notOnGUI ;
     ] , [
         a lv2:InputPort , lv2:AudioPort ;
-        lv2:index 9 ;
+        lv2:index 14 ;
         lv2:symbol "audio_in_L" ;
         lv2:name "Audio Input L" ;
     ] , [
         a lv2:InputPort , lv2:AudioPort ;
-        lv2:index 10 ;
+        lv2:index 15 ;
         lv2:symbol "audio_in_R" ;
         lv2:name "Audio Input R" ;
     ] , [
         a lv2:OutputPort , lv2:AudioPort ;
-        lv2:index 11 ;
+        lv2:index 16 ;
         lv2:symbol "audio_out_L" ;
         lv2:name "Audio Output L" ;
     ] , [
         a lv2:OutputPort , lv2:AudioPort ;
-        lv2:index 12 ;
+        lv2:index 17 ;
         lv2:symbol "audio_out_R" ;
         lv2:name "Audio Output R" ;
     ] .
