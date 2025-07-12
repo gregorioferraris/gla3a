@@ -1,4 +1,4 @@
-#ifndef GLA3A_H
+\    #ifndef GLA3A_H
 #define GLA3A_H
 
 #include <lv2/core/lv2.h> // Richiesto per tipi LV2 come LV2_URID
@@ -17,8 +17,8 @@ typedef enum {
     GLA3A_PEAK_REDUCTION = 0,
     GLA3A_GAIN = 1,
     GLA3A_METER = 2,
-    GLA3A_BYPASS = 3,               // Controllo True Bypass
-    GLA3A_MS_MODE_ACTIVE = 4,       // Controllo per attivare/disattivare la modalità Mid/Side
+    GLA3A_BYPASS = 3,               // NUOVO: Controllo True Bypass
+    GLA3A_MS_MODE_ACTIVE = 4,       // NUOVO: Controllo per attivare/disattivare la modalità Mid/Side
     GLA3A_OUTPUT_RMS = 5,           // Porta di output per il meter RMS
     GLA3A_GAIN_REDUCTION_METER = 6, // Porta di output per il meter di Gain Reduction
     GLA3A_AUDIO_IN_L = 7,           // Ingresso audio canale Left
