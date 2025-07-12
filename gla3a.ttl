@@ -1,132 +1,107 @@
-@prefix doap:  <http://usefulinc.com/ns/doap#> .
-@prefix lv2:   <http://lv2plug.in/ns/lv2core#> .
-@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix ui:   <http://lv2plug.in/ns/extensions/ui#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix pset: <http://lv2plug.in/ns/ext/presets#> .
+@prefix atom: <http://lv2plug.in/ns/ext/atom#> .
+@prefix urid: <http://lv2plug.in/ns/ext/urid#> .
+@prefix midi: <http://lv2plug.in/ns/ext/midi#> .
+@prefix doap: <http://usefulinc.com/ns/doap#> .
 @prefix units: <http://lv2plug.in/ns/extensions/units#> .
-@prefix pprops: <http://lv2plug.in/ns/ext/port-props#> .
-@prefix ui:    <http://lv2plug.in/ns/extensions/ui#> .
-@prefix foaf:  <http://xmlns.com/foaf/0.1/> . # Aggiunto per doap:developer/maintainer
 
-# URI del Plugin (DEVE CORRISPONDERE ESATTAMENTE A QUELLO IN gla3a.cpp E ESSERE UNICO!)
 <http://moddevices.com/plugins/mod-devel/gla3a>
     a lv2:Plugin ;
     lv2:optionalFeature lv2:hardRTCapable ;
-    lv2:requiredFeature lv2:isControllable ;
-    doap:name "GLA3A Opto Compressor (J-FET Stage)" ; # Nome visualizzato nella DAW, più specifico
-    doap:developer [
-        rdfs:label "Il tuo nome" ; # Inserisci il tuo nome
-        foaf:mbox <mailto:tua.email@example.com> ; # Inserisci la tua email
-    ] ;
+    doap:name "GLA3A Leveling Amplifier" ;
     doap:maintainer [
-        rdfs:label "Il tuo nome" ; # Inserisci il tuo nome
-        foaf:mbox <mailto:tua.email@example.com> ; # Inserisci la tua email
+        doap:name "Your Name" ;
+        doap:mbox <mailto:your.email@example.com> ;
     ] ;
+    doap:homepage <http://yourwebsite.com> ;
+    doap:license <http://opensource.org/licenses/MIT> ;
+
     lv2:port [
-        a lv2:InputPort ,
-            lv2:ControlPort ;
+        a lv2:InputPort , lv2:ControlPort ;
         lv2:index 0 ;
-        lv2:symbol "input_gain" ; # Simbolo della porta (deve corrispondere al C++)
-        lv2:name "Input Gain" ;  # Nome visualizzato
-        lv2:default 0.5 ;
+        lv2:symbol "peak_reduction" ;
+        lv2:name "Peak Reduction" ;
+        lv2:default 0.0 ;
         lv2:minimum 0.0 ;
         lv2:maximum 1.0 ;
-        units:unit units:db ;
     ] , [
-        a lv2:InputPort ,
-            lv2:ControlPort ;
+        a lv2:InputPort , lv2:ControlPort ;
         lv2:index 1 ;
-        lv2:symbol "threshold" ;
-        lv2:name "Threshold" ;
-        lv2:default 0.5 ;
+        lv2:symbol "gain" ;
+        lv2:name "Gain" ;
+        lv2:default 0.0 ;
         lv2:minimum 0.0 ;
         lv2:maximum 1.0 ;
-        units:unit units:db ;
     ] , [
-        a lv2:InputPort ,
-            lv2:ControlPort ;
+        a lv2:InputPort , lv2:ControlPort ;
         lv2:index 2 ;
-        lv2:symbol "ratio" ;
-        lv2:name "Ratio" ;
-        lv2:default 2.0 ;
-        lv2:minimum 1.0 ;
-        lv2:maximum 10.0 ;
-    ] , [
-        a lv2:InputPort ,
-            lv2:ControlPort ;
-        lv2:index 3 ;
-        lv2:symbol "attack" ;
-        lv2:name "Attack" ;
-        lv2:default 10.0 ;
-        lv2:minimum 1.0 ;
-        lv2:maximum 500.0 ;
-        units:unit units:ms ;
-    ] , [
-        a lv2:InputPort ,
-            lv2:ControlPort ;
-        lv2:index 4 ;
-        lv2:symbol "release" ;
-        lv2:name "Release" ;
-        lv2:default 200.0 ;
-        lv2:minimum 10.0 ;
-        lv2:maximum 2000.0 ;
-        units:unit units:ms ;
-    ] , [
-        # NUOVA PORTA: J-FET Drive (Sostituisce "Tube Drive" o "Saturation")
-        a lv2:InputPort ,
-            lv2:ControlPort ;
-        lv2:index 5 ; # Indice corrisponde a GLA3A::drive nel C++
-        lv2:symbol "jfet_drive" ;
-        lv2:name "J-FET Drive" ;
-        lv2:default 1.0 ;
-        lv2:minimum 0.1 ; # Minimo non zero per evitare divisione per zero in jfet_transfer, se applicabile
-        lv2:maximum 10.0 ; # Aumentato il range per più saturazione
-        rdfs:comment "Controls the input gain and non-linearity of the J-FET stage." ;
-    ] , [
-        # NUOVA PORTA: J-FET Vp (Tensione di Pinch-off)
-        a lv2:InputPort ,
-            lv2:ControlPort ;
-        lv2:index 6 ; # Indice corrisponde a GLA3A::vp nel C++
-        lv2:symbol "jfet_vp" ;
-        lv2:name "J-FET Pinch-off Voltage (Vp)" ;
-        lv2:default -2.0 ; # Tipico valore di Vp, è negativo
-        lv2:minimum -5.0 ; # Range per Vp
-        lv2:maximum -0.5 ;
-        units:unit units:v ; # Unità per la tensione
-        rdfs:comment "J-FET pinch-off voltage, affects compression and saturation characteristics." ;
-    ] , [
-        # NUOVA PORTA: J-FET Idss (Corrente di Saturazione a Vgs=0)
-        a lv2:InputPort ,
-            lv2:ControlPort ;
-        lv2:index 7 ; # Indice corrisponde a GLA3A::idss nel C++
-        lv2:symbol "jfet_idss" ;
-        lv2:name "J-FET Saturation Current (Idss)" ;
-        lv2:default 0.005 ; # Valore tipico in Ampere
-        lv2:minimum 0.0001 ;
-        lv2:maximum 0.05 ;
-        units:unit units:ma ; # Puoi usare mA se preferisci, altrimenti lasciare il valore decimale
-        rdfs:comment "J-FET drain saturation current at Vgs=0, affects overall gain and character." ;
-    ] , [
-        # NUOVA PORTA: J-FET Output (Output Level)
-        a lv2:InputPort ,
-            lv2:ControlPort ;
-        lv2:index 8 ; # Indice corrisponde a GLA3A::output nel C++
-        lv2:symbol "jfet_output" ;
-        lv2:name "J-FET Output" ;
-        lv2:default 1.0 ;
+        lv2:symbol "meter" ;
+        lv2:name "Meter" ;
+        lv2:default 0.0 ;
         lv2:minimum 0.0 ;
-        lv2:maximum 2.0 ;
-        units:unit units:db ; # Puoi definirlo come dB o fattore lineare
-        rdfs:comment "Output gain after the J-FET stage." ;
+        lv2:maximum 1.0 ;
+        lv2:portProperty lv2:enumeration ;
+        lv2:scalePoint [ rdfs:label "Gain Reduction" ; lv2:value 0.0 ] ,
+                       [ rdfs:label "Output" ; lv2:value 1.0 ] ;
     ] , [
-        # Porte Audio (Indici aggiornati per seguire le nuove porte di controllo)
-        a lv2:InputPort ,
-            lv2:AudioPort ;
-        lv2:index 9 ; # L'indice 9 perché ci sono 9 porte di controllo (0-8)
-        lv2:symbol "audio_in" ;
-        lv2:name "Audio In" ;
+        a lv2:InputPort , lv2:ControlPort ;
+        lv2:index 3 ; # NUOVA PORTA
+        lv2:symbol "bypass" ;
+        lv2:name "Bypass" ;
+        lv2:portProperty lv2:toggled ;
+        lv2:default 0.0 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 1.0 ;
     ] , [
-        a lv2:OutputPort ,
-            lv2:AudioPort ;
-        lv2:index 10 ; # L'indice 10 perché ci sono 9 porte di controllo (0-8)
-        lv2:symbol "audio_out" ;
-        lv2:name "Audio Out" ;
+        a lv2:InputPort , lv2:ControlPort ;
+        lv2:index 4 ; # NUOVA PORTA
+        lv2:symbol "ms_mode_active" ;
+        lv2:name "M/S Mode" ;
+        lv2:portProperty lv2:toggled ;
+        lv2:default 0.0 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 1.0 ;
+    ] , [
+        a lv2:InputPort , lv2:ControlPort ;
+        lv2:index 5 ;
+        lv2:symbol "output_rms" ;
+        lv2:name "Output RMS" ;
+        lv2:designation units:db ;
+        lv2:default -60.0 ;
+        lv2:minimum -90.0 ;
+        lv2:maximum 0.0 ;
+        lv2:portProperty lv2:notOnGUI ;
+    ] , [
+        a lv2:InputPort , lv2:ControlPort ;
+        lv2:index 6 ;
+        lv2:symbol "gain_reduction_meter" ;
+        lv2:name "Gain Reduction Meter" ;
+        lv2:designation units:db ;
+        lv2:default 0.0 ;
+        lv2:minimum -30.0 ;
+        lv2:maximum 0.0 ;
+        lv2:portProperty lv2:notOnGUI ;
+    ] , [
+        a lv2:InputPort , lv2:AudioPort ;
+        lv2:index 7 ;
+        lv2:symbol "audio_in_L" ;
+        lv2:name "Audio Input L" ;
+    ] , [
+        a lv2:InputPort , lv2:AudioPort ;
+        lv2:index 8 ;
+        lv2:symbol "audio_in_R" ;
+        lv2:name "Audio Input R" ;
+    ] , [
+        a lv2:OutputPort , lv2:AudioPort ;
+        lv2:index 9 ;
+        lv2:symbol "audio_out_L" ;
+        lv2:name "Audio Output L" ;
+    ] , [
+        a lv2:OutputPort , lv2:AudioPort ;
+        lv2:index 10 ;
+        lv2:symbol "audio_out_R" ;
+        lv2:name "Audio Output R" ;
     ] .
