@@ -16,14 +16,19 @@ typedef enum {
     GLA3A_METER = 2,
     GLA3A_BYPASS = 3,
     GLA3A_MS_MODE_ACTIVE = 4,
-    GLA3A_SIDECHAIN_HF_FREQ = 5,    // NUOVO: Frequenza filtro HF sidechain
-    GLA3A_RATIO_MODE = 6,           // NUOVO: Modalità di ratio (3:1, 6:1, 9:1, Limit)
-    GLA3A_OUTPUT_RMS = 7,
-    GLA3A_GAIN_REDUCTION_METER = 8,
-    GLA3A_AUDIO_IN_L = 9,
-    GLA3A_AUDIO_IN_R = 10,
-    GLA3A_AUDIO_OUT_L = 11,
-    GLA3A_AUDIO_OUT_R = 12
+    GLA3A_RATIO_MODE = 5,
+    GLA3A_SC_LP_ON = 6,          // NUOVO: On/Off LowPass Sidechain
+    GLA3A_SC_LP_FREQ = 7,        // NUOVO: Frequenza LowPass Sidechain
+    GLA3A_SC_LP_Q = 8,           // NUOVO: Q/Risonanza LowPass Sidechain
+    GLA3A_SC_HP_ON = 9,          // NUOVO: On/Off HighPass Sidechain
+    GLA3A_SC_HP_FREQ = 10,       // NUOVO: Frequenza HighPass Sidechain
+    GLA3A_SC_HP_Q = 11,          // NUOVO: Q/Risonanza HighPass Sidechain
+    GLA3A_OUTPUT_RMS = 12,
+    GLA3A_GAIN_REDUCTION_METER = 13,
+    GLA3A_AUDIO_IN_L = 14,
+    GLA3A_AUDIO_IN_R = 15,
+    GLA3A_AUDIO_OUT_L = 16,
+    GLA3A_AUDIO_OUT_R = 17
 } GLA3A_PortIndex;
 
 // Enum per le modalità di ratio (per chiarezza nel codice C++)
