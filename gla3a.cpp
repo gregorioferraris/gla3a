@@ -1,74 +1,117 @@
-#include "gla3a.h" // Assicurati di includere il tuo file .h
+#include "gla3a.h"
 #include <lv2/core/lv2.h>
 #include <lv2/log/logger.h>
 #include <lv2/log/log.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h> // Per memcpy
+#include <string.h>
 
-// Costanti utili
+// --- Costanti e Definizioni ---
 #define M_PI_F 3.14159265358979323846f
 
-// --- Parametri di calibrazione dell'algoritmo ---
-// Tempi del detector (simil-ottico, da calibrare)
-#define DETECTOR_ATTACK_MS 10.0f  // Tempo di attacco del detector (ms)
-#define DETECTOR_RELEASE_MS 50.0f // Tempo di rilascio del detector (ms)
+// --- Calibrazione del Compressore ---
+#define PEAK_REDUCTION_MIN_DB -60.0f // Soglia min per Peak Reduction (più compressione)
+#define PEAK_REDUCTION_MAX_DB -10.0f // Soglia max per Peak Reduction (meno compressione)
+#define GAIN_MAX_DB 12.0f            // Guadagno massimo applicabile in dB
+#define KNEE_WIDTH_DB 10.0f          // Larghezza della soft-knee in dB
 
-// Caratteristiche della Knee
-#define KNEE_WIDTH_DB 10.0f     // Larghezza della soft-knee in dB
-#define THRESHOLD_MIN_DB -60.0f // Soglia minima quando Peak Reduction è 0
-#define THRESHOLD_MAX_DB -10.0f // Soglia massima quando Peak Reduction è 1 (meno compressione)
+// Tempi di smoothing per il detector e il gain (questi cambieranno con la ratio mode)
+#define DETECTOR_ATTACK_FACTOR_BASE 0.005f // Base per tempo attacco (veloce)
+#define DETECTOR_RELEASE_FACTOR_BASE 0.2f  // Base per tempo rilascio (lento)
 
-// Make-up Gain
-#define MAKEUP_GAIN_MAX_DB 12.0f // Guadagno massimo applicabile in dB
+// --- Sidechain Filter (Shelf) ---
+#define SIDECHAIN_HF_FREQ_MIN 200.0f  // Frequenza minima per il filtro HF (Hz)
+#define SIDECHAIN_HF_FREQ_MAX 10000.0f // Frequenza massima per il filtro HF (Hz)
+#define SIDECHAIN_HF_GAIN_DB 6.0f     // Guadagno massimo del filtro shelf in dB
 
-// Soft-Clipping
-#define SOFT_CLIP_THRESHOLD_DB -2.0f // Inizia il soft-clip a -2 dBFS
-#define SOFT_CLIP_AMOUNT 0.5f        // Quanto è "soft" il clip (da 0.0 a 1.0, 1.0 è hard clip)
+// --- J-FET Distortion ---
+#define JF_K_FACTOR 2.0f // Fattore di "durezza" della distorsione J-FET (regola il carattere)
+#define JF_DRY_WET_MIX 0.3f // Mix tra segnale pulito e distorto dal J-FET (0.0 a 1.0)
+#define JF_SATURATION_THRESHOLD 0.5f // Soglia (lineare) oltre la quale la distorsione J-FET è più evidente
 
-// RMS Meter Smoothing
-#define RMS_SMOOTH_MS 50.0f // Tempo in ms per la costante di tempo RMS del meter
+// --- Soft-Clipping Finale (Limiter) ---
+#define FINAL_SOFT_CLIP_THRESHOLD_DB -1.0f // Inizia il soft-clip finale a -1 dBFS
+#define FINAL_SOFT_CLIP_AMOUNT 0.5f        // Quanto è "soft" il clip finale (0.0 a 1.0, 1.0 è hard clip)
 
-// Funzione di utilità per il calcolo RMS
-static float calculate_rms_level(const float* buffer, uint32_t n_samples, float current_rms, float alpha) {
-    if (n_samples == 0) return current_rms;
-    float sum_sq = 0.0f;
-    for (uint32_t i = 0; i < n_samples; ++i) {
-        sum_sq += buffer[i] * buffer[i];
-    }
-    float block_rms_linear = sqrtf(sum_sq / n_samples);
-    return (current_rms * (1.0f - alpha)) + (block_rms_linear * alpha);
-}
 
-// Funzione di utilità per convertire da lineare a dB
+// --- Funzioni di Utilità ---
+
 static float to_db(float linear_val) {
-    if (linear_val <= 0.00000000001f) return -90.0f; // Evita log(0) e valori molto bassi
+    if (linear_val <= 0.00000000001f) return -90.0f;
     return 20.0f * log10f(linear_val);
 }
 
-// Funzione di utilità per convertire da dB a lineare
 static float db_to_linear(float db_val) {
     return powf(10.0f, db_val / 20.0f);
 }
 
-// Funzione per applicare il soft-clipping
-// Fonte di ispirazione: algorithms like the ArcTan soft-clipper, or similar cubic shapers
-static float apply_soft_clip(float sample, float threshold_linear, float amount) {
-    if (threshold_linear <= 0.000000001f) return sample; // Avoid division by zero or invalid threshold
-
+// Funzione per applicare il soft-clipping finale
+static float apply_final_soft_clip(float sample, float threshold_linear, float amount) {
     float sign = (sample >= 0) ? 1.0f : -1.0f;
     float abs_sample = fabsf(sample);
 
     if (abs_sample <= threshold_linear) {
-        return sample; // Nessun clipping sotto soglia
+        return sample;
     } else {
-        // Applica una curva smoother sopra la soglia
         float normalized_over_threshold = (abs_sample - threshold_linear) / (1.0f - threshold_linear);
-        // Usiamo una funzione smoothstep (o simile) per una transizione graduale
-        // Questa è una versione semplificata che si avvicina a tanh(x)
         float clipped_val = threshold_linear + (1.0f - threshold_linear) * (1.0f - expf(-amount * normalized_over_threshold));
-        return sign * fminf(clipped_val, 1.0f); // Clampa a 1.0 per evitare overshoot
+        return sign * fminf(clipped_val, 1.0f);
+    }
+}
+
+// Funzione per la distorsione J-FET (approssimazione sigmoide)
+// 'k' controlla la pendenza/durezza della curva
+static float apply_jfet_distortion(float sample, float k_factor, float threshold_jfet) {
+    // Normalizza il sample in base a una soglia per controllare dove inizia la "curva"
+    float normalized_sample = sample / threshold_jfet;
+    
+    // Funzione di shaping tipo arctan o tanh per modellare il J-FET
+    // Questa è una semplice funzione sigmoide, puoi sperimentare altre come atan(k*x)
+    float distorted_sample = normalized_sample / (1.0f + fabsf(normalized_sample * k_factor));
+    
+    // Ri-scala al range originale
+    return distorted_sample * threshold_jfet;
+}
+
+
+// Struttura per un filtro IIR di primo ordine (per sidechain)
+typedef struct {
+    float a0, b1; // Coefficienti
+    float z1;     // Stato precedente
+} OnePoleFilter;
+
+static void one_pole_filter_init(OnePoleFilter* f) {
+    f->a0 = 0.0f;
+    f->b1 = 0.0f;
+    f->z1 = 0.0f;
+}
+
+static float one_pole_filter_process(OnePoleFilter* f, float in) {
+    float out = in * f->a0 + f->z1;
+    f->z1 = in * f->b1;
+    return out;
+}
+
+// Calcola i coefficienti per un filtro shelf di primo ordine (per sidechain)
+// freq: frequenza di taglio in Hz
+// gain: guadagno dello shelf in dB
+static void calculate_shelf_coeffs(OnePoleFilter* f, double samplerate, float freq, float gain_db) {
+    float gain_linear = db_to_linear(gain_db);
+    float omega = 2.0f * M_PI_F * freq / samplerate;
+    float alpha = sinf(omega) / (2.0f * cosf(omega)); // Semplificazione per shelf
+
+    if (gain_db >= 0) { // High Shelf (boost)
+        f->b1 = (1.0f - alpha * sqrtf(gain_linear)) / (1.0f + alpha * sqrtf(gain_linear));
+        f->a0 = (1.0f + f->b1) / 2.0f;
+    } else { // High Shelf (cut)
+        gain_linear = 1.0f / gain_linear; // Inverti il gain per il cut
+        f->b1 = (1.0f - alpha * sqrtf(gain_linear)) / (1.0f + alpha * sqrtf(gain_linear));
+        f->a0 = (1.0f + f->b1) / 2.0f; // E' approssimativo, per un cut potresti voler un passa alto semplice
+        // Alternativa per passa-alto semplice:
+        // float x = expf(-2.0f * M_PI_F * freq / samplerate);
+        // f->a0 = (1.0f + x) * 0.5f;
+        // f->b1 = -(1.0f + x) * 0.5f; // Per passa-alto
     }
 }
 
@@ -79,9 +122,10 @@ typedef struct {
     float* peak_reduction_ptr;
     float* gain_ptr;
     float* meter_ptr;
-
     float* bypass_ptr;
     float* ms_mode_active_ptr;
+    float* sidechain_hf_freq_ptr; // Nuovo
+    float* ratio_mode_ptr;        // Nuovo
 
     // Puntatori per i meter (output del plugin, input per la GUI)
     float* output_rms_ptr;
@@ -99,22 +143,21 @@ typedef struct {
     LV2_Log_Logger logger;
 
     // Variabili di stato per l'algoritmo di compressione
-    float detector_envelope_M; // Envelope del detector per il canale Mid/Left
-    float detector_envelope_S; // Envelope del detector per il canale Side/Right
+    float detector_envelope_M; // Envelope del detector per Mid/Left
+    float detector_envelope_S; // Envelope del detector per Side/Right
 
-    float current_gain_M; // Guadagno attuale applicato (include make-up e GR) per Mid/Left (lineare)
-    float current_gain_S; // Guadagno attuale applicato (include make-up e GR) per Side/Right (lineare)
+    float current_gain_M;      // Guadagno attuale per Mid/Left (lineare)
+    float current_gain_S;      // Guadagno attuale per Side/Right (lineare)
 
-    // Variabili di stato per i meter
-    float current_output_rms_level;      // Stato persistente per il calcolo RMS dell'output (lineare)
-    float current_gain_reduction_display; // Stato persistente per il meter di gain reduction (visualizzato in dB)
+    // Filtri Sidechain
+    OnePoleFilter sc_filter_M; // Filtro sidechain per canale Mid/Left
+    OnePoleFilter sc_filter_S; // Filtro sidechain per canale Side/Right
 
-    // Parametri di smoothing (alpha) pre-calcolati al samplerate
-    float rms_alpha;
+    // Parametri di smoothing (alpha) pre-calcolati (variano con la ratio mode)
     float detector_attack_alpha;
     float detector_release_alpha;
-    float gain_smooth_alpha; // Per lo smoothing del guadagno applicato (per prevenire artefatti)
-
+    float gain_smooth_alpha; // Smoothing molto veloce per il guadagno applicato
+    float rms_meter_alpha;   // Smoothing per il meter RMS di output
 
 } Gla3a;
 
@@ -130,7 +173,6 @@ instantiate(const LV2_Descriptor* descriptor,
 
     self->samplerate = samplerate;
 
-    // Inizializzazione del logger
     for (int i = 0; features[i]; ++i) {
         if (!strcmp(features[i]->URI, LV2_LOG__log)) {
             self->log = (LV2_Log_Log*)features[i]->data;
@@ -138,21 +180,16 @@ instantiate(const LV2_Descriptor* descriptor,
     }
     lv2_log_logger_init(&self->logger, NULL, self->log);
 
-    // Inizializzazione delle variabili di stato del compressore
+    // Inizializzazione variabili di stato
     self->detector_envelope_M = 0.0f;
     self->detector_envelope_S = 0.0f;
-    self->current_gain_M = 1.0f; // Guadagno iniziale 0dB
-    self->current_gain_S = 1.0f; // Guadagno iniziale 0dB
+    self->current_gain_M = 1.0f;
+    self->current_gain_S = 1.0f;
 
-    // Inizializzazione dello stato dei meter
-    self->current_output_rms_level = db_to_linear(-60.0f); // Inizializza a un livello basso in lineare
-    self->current_gain_reduction_display = 0.0f; // Nessuna gain reduction all'inizio (in dB)
+    one_pole_filter_init(&self->sc_filter_M);
+    one_pole_filter_init(&self->sc_filter_S);
 
-    // Calcolo dei fattori di smoothing (alpha) basati sul sample rate
-    self->rms_alpha = 1.0f - expf(-1.0f / (self->samplerate * (RMS_SMOOTH_MS / 1000.0f)));
-    self->detector_attack_alpha = 1.0f - expf(-1.0f / (self->samplerate * (DETECTOR_ATTACK_MS / 1000.0f)));
-    self->detector_release_alpha = 1.0f - expf(-1.0f / (self->samplerate * (DETECTOR_RELEASE_MS / 1000.0f)));
-    self->gain_smooth_alpha = 1.0f - expf(-1.0f / (self->samplerate * 0.001f)); // Smoothing molto veloce per il gain applicato
+    self->rms_meter_alpha = 1.0f - expf(-1.0f / (self->samplerate * (50.0f / 1000.0f))); // 50ms per meter RMS
 
     return (LV2_Handle)self;
 }
@@ -168,6 +205,8 @@ connect_port(LV2_Handle instance, uint32_t port, void* data_location) {
         case GLA3A_METER:              self->meter_ptr = (float*)data_location; break;
         case GLA3A_BYPASS:             self->bypass_ptr = (float*)data_location; break;
         case GLA3A_MS_MODE_ACTIVE:     self->ms_mode_active_ptr = (float*)data_location; break;
+        case GLA3A_SIDECHAIN_HF_FREQ:  self->sidechain_hf_freq_ptr = (float*)data_location; break;
+        case GLA3A_RATIO_MODE:         self->ratio_mode_ptr = (float*)data_location; break;
         case GLA3A_OUTPUT_RMS:         self->output_rms_ptr = (float*)data_location; break;
         case GLA3A_GAIN_REDUCTION_METER: self->gain_reduction_meter_ptr = (float*)data_location; break;
         case GLA3A_AUDIO_IN_L:         self->audio_in_l_ptr = (const float*)data_location; break;
@@ -181,13 +220,16 @@ connect_port(LV2_Handle instance, uint32_t port, void* data_location) {
 static void
 activate(LV2_Handle instance) {
     Gla3a* self = (Gla3a*)instance;
-    // Resetta lo stato interno del compressore e dei meter
     self->detector_envelope_M = 0.0f;
     self->detector_envelope_S = 0.0f;
     self->current_gain_M = 1.0f;
     self->current_gain_S = 1.0f;
     self->current_output_rms_level = db_to_linear(-60.0f);
     self->current_gain_reduction_display = 0.0f;
+
+    // Reinitalizza i filtri sidechain
+    one_pole_filter_init(&self->sc_filter_M);
+    one_pole_filter_init(&self->sc_filter_S);
 }
 
 // Funzione di elaborazione audio (run)
@@ -202,27 +244,63 @@ run(LV2_Handle instance, uint32_t sample_count) {
 
     const float bypass = *self->bypass_ptr;
     const float ms_mode_active = *self->ms_mode_active_ptr;
+    const float ratio_mode = *self->ratio_mode_ptr;
 
-    // Parametri di controllo convertiti in range utile
-    // Peak Reduction: controlla la soglia di compressione.
-    // Il valore 0.0 -> THRESHOLD_MIN_DB (più compressione)
-    // Il valore 1.0 -> THRESHOLD_MAX_DB (meno compressione)
-    const float current_threshold_db = THRESHOLD_MIN_DB + (*self->peak_reduction_ptr * (THRESHOLD_MAX_DB - THRESHOLD_MIN_DB));
+    // --- Calcolo Parametri di Controllo ---
+    const float current_threshold_db = PEAK_REDUCTION_MIN_DB + (*self->peak_reduction_ptr * (PEAK_REDUCTION_MAX_DB - PEAK_REDUCTION_MIN_DB));
     const float current_threshold_linear = db_to_linear(current_threshold_db);
 
-    // Gain: make-up gain
-    const float make_up_gain_db = *self->gain_ptr * MAKEUP_GAIN_MAX_DB;
+    const float make_up_gain_db = *self->gain_ptr * GAIN_MAX_DB;
     const float make_up_gain_linear = db_to_linear(make_up_gain_db);
 
-    // Soft-clip threshold
-    const float soft_clip_threshold_linear = db_to_linear(SOFT_CLIP_THRESHOLD_DB);
+    const float final_soft_clip_threshold_linear = db_to_linear(FINAL_SOFT_CLIP_THRESHOLD_DB);
+
+    // --- Parametri di Attacco/Rilascio e Ratio in base alla modalità ---
+    float current_ratio;
+    float current_detector_attack_ms = DETECTOR_ATTACK_FACTOR_BASE;
+    float current_detector_release_ms = DETECTOR_RELEASE_FACTOR_BASE;
+
+    switch ((GLA3A_RatioMode)ratio_mode) {
+        case GLA3A_RATIO_3_TO_1:
+            current_ratio = 3.0f;
+            current_detector_attack_ms = 10.0f; // Veloce
+            current_detector_release_ms = 200.0f; // Lento
+            break;
+        case GLA3A_RATIO_6_TO_1:
+            current_ratio = 6.0f;
+            current_detector_attack_ms = 5.0f; // Più veloce
+            current_detector_release_ms = 100.0f; // Medio
+            break;
+        case GLA3A_RATIO_9_TO_1:
+            current_ratio = 9.0f;
+            current_detector_attack_ms = 3.0f; // Ancora più veloce
+            current_detector_release_ms = 50.0f; // Più veloce
+            break;
+        case GLA3A_RATIO_LIMIT: // Comportamento da Limiter
+            current_ratio = 20.0f; // Ratio molto alta, quasi infinita
+            current_detector_attack_ms = 1.0f; // Molto veloce
+            current_detector_release_ms = 20.0f; // Veloce
+            break;
+    }
+
+    // Ricomputa gli alpha in base ai nuovi tempi
+    self->detector_attack_alpha = 1.0f - expf(-1.0f / (self->samplerate * (current_detector_attack_ms / 1000.0f)));
+    self->detector_release_alpha = 1.0f - expf(-1.0f / (self->samplerate * (current_detector_release_ms / 1000.0f)));
+    self->gain_smooth_alpha = 1.0f - expf(-1.0f / (self->samplerate * 0.001f)); // Molto veloce
+
+    // Parametri Sidechain Filter
+    float sidechain_freq_hz = SIDECHAIN_HF_FREQ_MIN + (*self->sidechain_hf_freq_ptr * (SIDECHAIN_HF_FREQ_MAX - SIDECHAIN_HF_FREQ_MIN));
+    calculate_shelf_coeffs(&self->sc_filter_M, self->samplerate, sidechain_freq_hz, SIDECHAIN_HF_GAIN_DB);
+    self->sc_filter_S.a0 = self->sc_filter_M.a0; // Copia per simmetria
+    self->sc_filter_S.b1 = self->sc_filter_M.b1;
+
 
     // --- Logica True Bypass ---
     if (bypass > 0.5f) {
         if (in_l != out_l) { memcpy(out_l, in_l, sizeof(float) * sample_count); }
         if (in_r != out_r) { memcpy(out_r, in_r, sizeof(float) * sample_count); }
 
-        self->current_output_rms_level = calculate_rms_level(in_l, sample_count, self->current_output_rms_level, self->rms_alpha);
+        self->current_output_rms_level = calculate_rms_level(in_l, sample_count, self->current_output_rms_level, self->rms_meter_alpha);
         *self->output_rms_ptr = to_db(self->current_output_rms_level);
         *self->gain_reduction_meter_ptr = 0.0f; // Nessuna gain reduction in bypass
         return;
@@ -233,110 +311,118 @@ run(LV2_Handle instance, uint32_t sample_count) {
         float input_l = in_l[i];
         float input_r = in_r[i];
 
-        float M_signal = 0.0f, S_signal = 0.0f; // Segnali per l'elaborazione (Mid/Left e Side/Right)
+        float M_audio = 0.0f, S_audio = 0.0f; // Segnali audio per l'elaborazione (Mid/Left e Side/Right)
+        float M_sidechain = 0.0f, S_sidechain = 0.0f; // Segnali per la sidechain
 
         if (ms_mode_active > 0.5f) {
-            // --- Codifica L/R in M/S (a monte della compressione) ---
-            M_signal = (input_l + input_r);
-            S_signal = (input_l - input_r);
+            // Codifica L/R in M/S per l'audio principale
+            M_audio = (input_l + input_r) * 0.5f; // Normalizza subito i segnali M/S
+            S_audio = (input_l - input_r) * 0.5f;
+
+            // Codifica L/R in M/S per la sidechain (se la sidechain usa M/S)
+            M_sidechain = (input_l + input_r) * 0.5f;
+            S_sidechain = (input_l - input_r) * 0.5f;
         } else {
-            // Se la modalità M/S non è attiva, processa i canali Left e Right separatamente.
-            M_signal = input_l; // Tratta Left come "Mid" per la pipeline di elaborazione
-            S_signal = input_r; // Tratta Right come "Side" per la pipeline di elaborazione
+            // Se non M/S, Left e Right sono i canali indipendenti
+            M_audio = input_l;
+            S_audio = input_r;
+
+            M_sidechain = input_l;
+            S_sidechain = input_r;
         }
 
-        // --- APPLICA LA LOGICA DI COMPRESSIONE GLA3A (Soft-Knee) ---
-        // Ogni canale (M_signal, S_signal) è processato in modo indipendente.
+        // --- FILTRAGGIO SIDECHAIN (J-FET) ---
+        // Applica il filtro shelving ai segnali della sidechain
+        M_sidechain = one_pole_filter_process(&self->sc_filter_M, fabsf(M_sidechain)); // Usiamo l'assoluto per il detector
+        S_sidechain = one_pole_filter_process(&self->sc_filter_S, fabsf(S_sidechain));
 
+        // --- COMPRESSIONE con Soft-Knee e Ratio Variabile ---
         // Canale M/Left
-        // 1. Aggiorna l'envelope del detector (usando valori assoluti)
-        float abs_M_signal = fabsf(M_signal);
-        if (abs_M_signal > self->detector_envelope_M) { // Attacco
-            self->detector_envelope_M = (self->detector_envelope_M * (1.0f - self->detector_attack_alpha)) + (abs_M_signal * self->detector_attack_alpha);
+        // 1. Aggiorna l'envelope del detector (basato sul segnale sidechain filtrato)
+        if (M_sidechain > self->detector_envelope_M) { // Attacco
+            self->detector_envelope_M = (self->detector_envelope_M * (1.0f - self->detector_attack_alpha)) + (M_sidechain * self->detector_attack_alpha);
         } else { // Rilascio
-            self->detector_envelope_M = (self->detector_envelope_M * (1.0f - self->detector_release_alpha)) + (abs_M_signal * self->detector_release_alpha);
+            self->detector_envelope_M = (self->detector_envelope_M * (1.0f - self->detector_release_alpha)) + (M_sidechain * self->detector_release_alpha);
         }
 
         // 2. Calcola la gain reduction desiderata con soft-knee
-        float gain_reduction_factor_M;
-        float input_db_M = to_db(self->detector_envelope_M);
+        float target_gr_db_M = 0.0f; // Gain Reduction in dB
+        float detector_env_db_M = to_db(self->detector_envelope_M);
 
-        if (input_db_M < current_threshold_db) {
-            // Sotto la knee: nessuna compressione (gain reduction 0dB / factor 1.0)
-            gain_reduction_factor_M = 1.0f;
-        } else if (input_db_M > (current_threshold_db + KNEE_WIDTH_DB)) {
-            // Sopra la knee completa: compressione con rapporto fisso (es. ~3:1 per LA-3A)
-            // Un rapporto fisso di 3:1 in dB significa che ogni 3dB in più sull'input, 1dB in più sull'output.
-            // O, in termini di gain reduction, G = 1/R. GR = 1 - (1/R)
-            // Se G = Vin/Vout, R = delta_Vin/delta_Vout. Per la GR, è 1 / (Gain dopo compressione)
-            // L'LA-3A è un compressore di guadagno variabile, quindi il rapporto non è fisso.
-            // Qui emuliamo un rapporto che si intensifica sopra la knee.
-            float diff_db = input_db_M - (current_threshold_db + KNEE_WIDTH_DB);
-            // Questo è un'approssimazione del rapporto non lineare.
-            // Un 3:1 fisso sarebbe db_out = db_knee_end + diff_db / 3.0f;
-            // gain_reduction_db = db_in - db_out;
-            // gain_reduction_db = diff_db - (diff_db / 3.0f) = diff_db * (2.0f/3.0f);
-            float target_gr_db = diff_db * (2.0f / 3.0f); // ~3:1 ratio for simplicity
-            gain_reduction_factor_M = db_to_linear(-target_gr_db);
-        } else {
+        if (detector_env_db_M > (current_threshold_db + KNEE_WIDTH_DB)) {
+            // Sopra la knee completa: compressione con rapporto fisso
+            float over_threshold_db = detector_env_db_M - (current_threshold_db + KNEE_WIDTH_DB);
+            target_gr_db_M = over_threshold_db * (1.0f - (1.0f / current_ratio));
+        } else if (detector_env_db_M > current_threshold_db) {
             // Dentro la knee: soft-knee compression
-            float normalized_pos_in_knee = (input_db_M - current_threshold_db) / KNEE_WIDTH_DB;
-            // Una curva smoother per la knee (es. quadratica o sigmoidale)
-            // Qui usiamo una interpolazione lineare del rapporto. Rapporto va da 1:1 a ~3:1
-            float ratio_interp = 1.0f + (2.0f * normalized_pos_in_knee); // Da 1 a 3
-            float target_gr_db = (input_db_M - current_threshold_db) * (1.0f - (1.0f / ratio_interp));
-            gain_reduction_factor_M = db_to_linear(-target_gr_db);
+            float normalized_pos_in_knee = (detector_env_db_M - current_threshold_db) / KNEE_WIDTH_DB;
+            // Interpola il rapporto da 1:1 a 'current_ratio'
+            float effective_ratio_in_knee = 1.0f + (current_ratio - 1.0f) * normalized_pos_in_knee;
+            target_gr_db_M = (detector_env_db_M - current_threshold_db) * (1.0f - (1.0f / effective_ratio_in_knee));
         }
+        
+        // Clampa la gain reduction per evitare gain negativo (boost) o eccessiva riduzione
+        target_gr_db_M = fmaxf(0.0f, target_gr_db_M); // La GR deve essere >= 0dB (attenuazione)
 
-        // 3. Smooth (rampa) il guadagno applicato per evitare clicks/pops
-        float target_gain_M = gain_reduction_factor_M * make_up_gain_linear;
-        self->current_gain_M = (self->current_gain_M * (1.0f - self->gain_smooth_alpha)) + (target_gain_M * self->gain_smooth_alpha);
-
-        float processed_M = M_signal * self->current_gain_M;
+        // Converti la GR in dB a un fattore lineare e applica make-up gain
+        float target_total_gain_M = db_to_linear(-target_gr_db_M) * make_up_gain_linear;
+        
+        // Smooth (rampa) il guadagno applicato per evitare clicks/pops
+        self->current_gain_M = (self->current_gain_M * (1.0f - self->gain_smooth_alpha)) + (target_total_gain_M * self->gain_smooth_alpha);
+        
+        float processed_M = M_audio * self->current_gain_M;
 
 
         // Canale S/Right (Logica identica al canale M/Left)
-        float abs_S_signal = fabsf(S_signal);
-        if (abs_S_signal > self->detector_envelope_S) {
-            self->detector_envelope_S = (self->detector_envelope_S * (1.0f - self->detector_attack_alpha)) + (abs_S_signal * self->detector_attack_alpha);
+        if (S_sidechain > self->detector_envelope_S) {
+            self->detector_envelope_S = (self->detector_envelope_S * (1.0f - self->detector_attack_alpha)) + (S_sidechain * self->detector_attack_alpha);
         } else {
-            self->detector_envelope_S = (self->detector_envelope_S * (1.0f - self->detector_release_alpha)) + (abs_S_signal * self->detector_release_alpha);
+            self->detector_envelope_S = (self->detector_envelope_S * (1.0f - self->detector_release_alpha)) + (S_sidechain * self->detector_release_alpha);
         }
 
-        float gain_reduction_factor_S;
-        float input_db_S = to_db(self->detector_envelope_S);
+        float target_gr_db_S = 0.0f;
+        float detector_env_db_S = to_db(self->detector_envelope_S);
 
-        if (input_db_S < current_threshold_db) {
-            gain_reduction_factor_S = 1.0f;
-        } else if (input_db_S > (current_threshold_db + KNEE_WIDTH_DB)) {
-            float diff_db = input_db_S - (current_threshold_db + KNEE_WIDTH_DB);
-            float target_gr_db = diff_db * (2.0f / 3.0f);
-            gain_reduction_factor_S = db_to_linear(-target_gr_db);
-        } else {
-            float normalized_pos_in_knee = (input_db_S - current_threshold_db) / KNEE_WIDTH_DB;
-            float ratio_interp = 1.0f + (2.0f * normalized_pos_in_knee);
-            float target_gr_db = (input_db_S - current_threshold_db) * (1.0f - (1.0f / ratio_interp));
-            gain_reduction_factor_S = db_to_linear(-target_gr_db);
+        if (detector_env_db_S > (current_threshold_db + KNEE_WIDTH_DB)) {
+            float over_threshold_db = detector_env_db_S - (current_threshold_db + KNEE_WIDTH_DB);
+            target_gr_db_S = over_threshold_db * (1.0f - (1.0f / current_ratio));
+        } else if (detector_env_db_S > current_threshold_db) {
+            float normalized_pos_in_knee = (detector_env_db_S - current_threshold_db) / KNEE_WIDTH_DB;
+            float effective_ratio_in_knee = 1.0f + (current_ratio - 1.0f) * normalized_pos_in_knee;
+            target_gr_db_S = (detector_env_db_S - current_threshold_db) * (1.0f - (1.0f / effective_ratio_in_knee));
         }
+        target_gr_db_S = fmaxf(0.0f, target_gr_db_S);
 
-        float target_gain_S = gain_reduction_factor_S * make_up_gain_linear;
-        self->current_gain_S = (self->current_gain_S * (1.0f - self->gain_smooth_alpha)) + (target_gain_S * self->gain_smooth_alpha);
+        float target_total_gain_S = db_to_linear(-target_gr_db_S) * make_up_gain_linear;
+        self->current_gain_S = (self->current_gain_S * (1.0f - self->gain_smooth_alpha)) + (target_total_gain_S * self->gain_smooth_alpha);
 
-        float processed_S = S_signal * self->current_gain_S;
+        float processed_S = S_audio * self->current_gain_S;
 
-        // --- Decodifica M/S in L/R (a valle della compressione) ---
+
+        // --- DISTORSIONE J-FET (NON LINEARITÀ E ARMONICHE) ---
+        // Applica la distorsione J-FET dopo la compressione e prima della decodifica/clipping finale
+        // Questo simula la colorazione del circuito.
+        processed_M = apply_jfet_distortion(processed_M, JF_K_FACTOR, JF_SATURATION_THRESHOLD);
+        processed_S = apply_jfet_distortion(processed_S, JF_K_FACTOR, JF_SATURATION_THRESHOLD);
+
+        // Mixare con il segnale "dry" per controllare l'intensità della distorsione
+        processed_M = processed_M * JF_DRY_WET_MIX + M_audio * (1.0f - JF_DRY_WET_MIX);
+        processed_S = processed_S * JF_DRY_WET_MIX + S_audio * (1.0f - JF_DRY_WET_MIX);
+
+
+        // --- Decodifica M/S in L/R (a valle della compressione/distorsione) ---
         float output_l, output_r;
         if (ms_mode_active > 0.5f) {
-            output_l = (processed_M + processed_S) * 0.5f;
-            output_r = (processed_M - processed_S) * 0.5f;
+            output_l = processed_M + processed_S; // Già normalizzati 0.5 all'inizio
+            output_r = processed_M - processed_S;
         } else {
             output_l = processed_M;
             output_r = processed_S;
         }
 
-        // --- Applica Soft-Clipping all'output (a valle della decodifica L/R) ---
-        output_l = apply_soft_clip(output_l, soft_clip_threshold_linear, SOFT_CLIP_AMOUNT);
-        output_r = apply_soft_clip(output_r, soft_clip_threshold_linear, SOFT_CLIP_AMOUNT);
+        // --- Soft-Clipping Finale (Limiter di Sicurezza) ---
+        output_l = apply_final_soft_clip(output_l, final_soft_clip_threshold_linear, FINAL_SOFT_CLIP_AMOUNT);
+        output_r = apply_final_soft_clip(output_r, final_soft_clip_threshold_linear, FINAL_SOFT_CLIP_AMOUNT);
 
         // Scrivi i sample elaborati nei buffer di output
         out_l[i] = output_l;
@@ -344,48 +430,12 @@ run(LV2_Handle instance, uint32_t sample_count) {
     }
 
     // --- Aggiornamento dei valori dei meter per l'intero blocco ---
-    self->current_output_rms_level = calculate_rms_level(out_l, sample_count, self->current_output_rms_level, self->rms_alpha);
+    self->current_output_rms_level = calculate_rms_level(out_l, sample_count, self->current_output_rms_level, self->rms_meter_alpha);
     *self->output_rms_ptr = to_db(self->current_output_rms_level);
 
     // Calcolo della Gain Reduction Media per il meter di GR
-    // La GR è 1.0 / guadagno applicato (quindi 1.0 / self->current_gain_M)
-    // Se self->current_gain_M include già il make-up gain, dobbiamo isolare solo la GR.
-    // Oppure, più semplice, misuriamo la differenza in dB tra input ed output.
-    // Per semplicità qui, prendiamo la media delle gain reduction derivate dai fattori di guadagno attuali.
-    // current_gain_M / make_up_gain_linear = fattore di riduzione dovuto alla compressione
-    float gr_factor_M_only = self->current_gain_M / make_up_gain_linear;
-    float gr_factor_S_only = self->current_gain_S / make_up_gain_linear;
+    // Qui prendiamo il valore in dB della GR effettiva
+    float actual_gr_db_M = to_db(make_up_gain_linear) - to_db(self->current_gain_M);
+    float actual_gr_db_S = to_db(make_up_gain_linear) - to_db(self->current_gain_S);
 
-    // Prendiamo il valore più grande di riduzione di guadagno applicato (più "negativo" in dB)
-    float avg_gr_factor = fminf(gr_factor_M_only, gr_factor_S_only); // O una media fminf(fminf(gr_M, gr_S), 1.0f)
-
-    // Se non c'è compressione, avg_gr_factor sarà circa 1.0, quindi GR sarà 0dB.
-    *self->gain_reduction_meter_ptr = to_db(avg_gr_factor);
-}
-
-// Funzione di pulizia
-static void
-cleanup(LV2_Handle instance) {
-    free(instance);
-}
-
-// Descrittore del plugin
-static const LV2_Descriptor descriptor = {
-    GLA3A_URI,
-    instantiate,
-    connect_port,
-    activate,
-    run,
-    NULL, // deactivate
-    cleanup,
-    NULL // extension_data
-};
-
-// Punto di ingresso LV2
-LV2_SYMBOL_EXPORT
-const LV2_Descriptor* lv2_descriptor(uint32_t index) {
-    if (index == 0) {
-        return &descriptor;
-    }
-    return NULL;
-}
+    // Il meter mostra la GR del canale che sta riducendo di 
