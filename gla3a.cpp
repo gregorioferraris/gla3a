@@ -349,4 +349,135 @@ run(LV2_Handle instance, uint32_t sample_count) {
             current_detector_attack_ms = 3.0f; // Ancora più veloce
             current_detector_release_ms = 50.0f; // Più veloce
             break;
-        case GLA3A_RATIO_LIMIT:
+        case GLA3A_RATIO_LIMIT: // Comportamento da Limiter
+            current_ratio = 20.0f; // Ratio molto alta, quasi infinita
+            current_detector_attack_ms = 1.0f; // Molto veloce
+            current_detector_release_ms = 20.0f; // Veloce
+            break;
+    }
+
+    // Ricomputa gli alpha in base ai nuovi tempi
+    self->detector_attack_alpha = 1.0f - expf(-1.0f / (self->samplerate * (current_detector_attack_ms / 1000.0f)));
+    self->detector_release_alpha = 1.0f - expf(-1.0f / (self->samplerate * (current_detector_release_ms / 1000.0f)));
+    self->gain_smooth_alpha = 1.0f - expf(-1.0f / (self->samplerate * 0.001f)); // Molto veloce
+
+
+    // --- Aggiornamento Coefficienti Filtri Sidechain (solo se i parametri sono cambiati) ---
+    bool lp_coeffs_changed = false;
+    if (fabsf(sc_lp_freq - self->last_sc_lp_freq) > 1e-6 || fabsf(sc_lp_q - self->last_sc_lp_q) > 1e-6) {
+        lp_coeffs_changed = true;
+        self->last_sc_lp_freq = sc_lp_freq;
+        self->last_sc_lp_q = sc_lp_q;
+    }
+
+    bool hp_coeffs_changed = false;
+    if (fabsf(sc_hp_freq - self->last_sc_hp_freq) > 1e-6 || fabsf(sc_hp_q - self->last_sc_hp_q) > 1e-6) {
+        hp_coeffs_changed = true;
+        self->last_sc_hp_freq = sc_hp_freq;
+        self->last_sc_hp_q = sc_hp_q;
+    }
+
+    if (lp_coeffs_changed) {
+        for(int i = 0; i < NUM_BIQUADS_FOR_6TH_ORDER; ++i) {
+            calculate_biquad_coeffs(&self->sc_lp_filters_M[i], self->samplerate, sc_lp_freq, sc_lp_q, 0); // Type 0 = LP
+            calculate_biquad_coeffs(&self->sc_lp_filters_S[i], self->samplerate, sc_lp_freq, sc_lp_q, 0);
+        }
+    }
+    if (hp_coeffs_changed) {
+        for(int i = 0; i < NUM_BIQUADS_FOR_6TH_ORDER; ++i) {
+            calculate_biquad_coeffs(&self->sc_hp_filters_M[i], self->samplerate, sc_hp_freq, sc_hp_q, 1); // Type 1 = HP
+            calculate_biquad_coeffs(&self->sc_hp_filters_S[i], self->samplerate, sc_hp_freq, sc_hp_q, 1);
+        }
+    }
+
+
+    // --- Logica True Bypass ---
+    if (bypass > 0.5f) {
+        if (in_l != out_l) { memcpy(out_l, in_l, sizeof(float) * sample_count); }
+        if (in_r != out_r) { memcpy(out_r, in_r, sizeof(float) * sample_count); }
+
+        // Aggiorna l'RMS dell'output con il segnale di input in bypass
+        float temp_rms_buffer_M[sample_count];
+        float temp_rms_buffer_S[sample_count];
+        if (ms_mode_active > 0.5f) {
+            for(uint32_t j=0; j<sample_count; ++j) {
+                temp_rms_buffer_M[j] = (in_l[j] + in_r[j]) * 0.5f;
+                temp_rms_buffer_S[j] = (in_l[j] - in_r[j]) * 0.5f;
+            }
+        } else {
+            memcpy(temp_rms_buffer_M, in_l, sizeof(float) * sample_count);
+            memcpy(temp_rms_buffer_S, in_r, sizeof(float) * sample_count);
+        }
+        self->current_output_rms_level = calculate_rms_level(temp_rms_buffer_M, sample_count, self->current_output_rms_level, self->rms_meter_alpha);
+        *self->output_rms_ptr = to_db(self->current_output_rms_level);
+        *self->gain_reduction_meter_ptr = 0.0f; // Nessuna gain reduction in bypass
+        return;
+    }
+
+    // --- Loop di elaborazione audio sample per sample ---
+    for (uint32_t i = 0; i < sample_count; ++i) {
+        float input_l = in_l[i];
+        float input_r = in_r[i];
+
+        float M_audio = 0.0f, S_audio = 0.0f; // Segnali audio per l'elaborazione (Mid/Left e Side/Right)
+        float M_sidechain_in = 0.0f, S_sidechain_in = 0.0f; // Segnali di input per la sidechain
+
+        if (ms_mode_active > 0.5f) {
+            M_audio = (input_l + input_r) * 0.5f; // Normalizza subito i segnali M/S
+            S_audio = (input_l - input_r) * 0.5f;
+
+            M_sidechain_in = (input_l + input_r) * 0.5f;
+            S_sidechain_in = (input_l - input_r) * 0.5f;
+        } else {
+            M_audio = input_l;
+            S_audio = input_r;
+
+            M_sidechain_in = input_l;
+            S_sidechain_in = input_r;
+        }
+
+        // --- FILTRAGGIO SIDECHAIN (6° Ordine) ---
+        float M_sidechain_filtered = fabsf(M_sidechain_in); // Detector su ampiezza
+        float S_sidechain_filtered = fabsf(S_sidechain_in);
+
+        if (sc_lp_on > 0.5f) {
+            for(int k = 0; k < NUM_BIQUADS_FOR_6TH_ORDER; ++k) {
+                M_sidechain_filtered = biquad_process(&self->sc_lp_filters_M[k], M_sidechain_filtered);
+                S_sidechain_filtered = biquad_process(&self->sc_lp_filters_S[k], S_sidechain_filtered);
+            }
+        }
+        if (sc_hp_on > 0.5f) {
+            for(int k = 0; k < NUM_BIQUADS_FOR_6TH_ORDER; ++k) {
+                M_sidechain_filtered = biquad_process(&self->sc_hp_filters_M[k], M_sidechain_filtered);
+                S_sidechain_filtered = biquad_process(&self->sc_hp_filters_S[k], S_sidechain_filtered);
+            }
+        }
+
+        // --- COMPRESSIONE con Soft-Knee e Ratio Variabile ---
+        // Canale M/Left
+        if (M_sidechain_filtered > self->detector_envelope_M) { // Attacco
+            self->detector_envelope_M = (self->detector_envelope_M * (1.0f - self->detector_attack_alpha)) + (M_sidechain_filtered * self->detector_attack_alpha);
+        } else { // Rilascio
+            self->detector_envelope_M = (self->detector_envelope_M * (1.0f - self->detector_release_alpha)) + (M_sidechain_filtered * self->detector_release_alpha);
+        }
+
+        float target_gr_db_M = 0.0f;
+        float detector_env_db_M = to_db(self->detector_envelope_M);
+
+        if (detector_env_db_M > (current_threshold_db + KNEE_WIDTH_DB)) {
+            float over_threshold_db = detector_env_db_M - (current_threshold_db + KNEE_WIDTH_DB);
+            target_gr_db_M = over_threshold_db * (1.0f - (1.0f / current_ratio));
+        } else if (detector_env_db_M > current_threshold_db) {
+            float normalized_pos_in_knee = (detector_env_db_M - current_threshold_db) / KNEE_WIDTH_DB;
+            float effective_ratio_in_knee = 1.0f + (current_ratio - 1.0f) * normalized_pos_in_knee;
+            target_gr_db_M = (detector_env_db_M - current_threshold_db) * (1.0f - (1.0f / effective_ratio_in_knee));
+        }
+        target_gr_db_M = fmaxf(0.0f, target_gr_db_M);
+
+        float target_total_gain_M = db_to_linear(-target_gr_db_M) * make_up_gain_linear;
+        self->current_gain_M = (self->current_gain_M * (1.0f - self->gain_smooth_alpha)) + (target_total_gain_M * self->gain_smooth_alpha);
+        
+        float processed_M = M_audio * self->current_gain_M;
+
+
+ 
