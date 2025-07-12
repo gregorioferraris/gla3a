@@ -14,8 +14,8 @@ typedef struct {
     float* gain_ptr;
     float* meter_ptr;
 
-    float* bypass_ptr;         // NUOVO: Puntatore per il controllo Bypass
-    float* ms_mode_active_ptr; // NUOVO: Puntatore per il controllo M/S Mode
+    float* bypass_ptr;
+    float* ms_mode_active_ptr;
 
     // Puntatori per i meter (output del plugin, input per la GUI)
     float* output_rms_ptr;
@@ -33,16 +33,25 @@ typedef struct {
     LV2_Log_Logger logger;
 
     // TODO: Aggiungi qui le variabili di stato specifiche per il tuo algoritmo di compressione GLA3A
-    // es: envelope detector state, gain computer state, filter state, etc.
-    float current_output_rms;      // Stato persistente per il calcolo RMS
-    float current_gain_reduction;  // Stato persistente per il meter di gain reduction
+    // Ogni canale (L/R o M/S) avrà probabilmente bisogno del proprio set di variabili di stato
+    // Ad esempio, per un compressore ottico come il LA-3A, avrai bisogno di variabili
+    // per il detector di envelope, la gain reduction applicata, ecc. per ogni canale.
+    // Esempio:
+    // float gr_detector_state_M;
+    // float gr_detector_state_S;
+    // float current_gain_M;
+    // float current_gain_S;
 
-    // Parametri per il calcolo RMS (già usati in GUA76)
+
+    float current_output_rms;
+    float current_gain_reduction;
+
+    // Parametri per il calcolo RMS
     float rms_alpha;
 
 } Gla3a;
 
-// Funzione di utilità per il calcolo RMS (copiata da GUA76)
+// Funzione di utilità per il calcolo RMS
 static float calculate_rms_level(const float* buffer, uint32_t n_samples, float current_rms, float alpha) {
     float sum_sq = 0.0f;
     for (uint32_t i = 0; i < n_samples; ++i) {
@@ -52,9 +61,9 @@ static float calculate_rms_level(const float* buffer, uint32_t n_samples, float 
     return (current_rms * (1.0f - alpha)) + (block_rms * alpha);
 }
 
-// Funzione di utilità per convertire da lineare a dB (copiata da GUA76)
+// Funzione di utilità per convertire da lineare a dB
 static float to_db(float linear_val) {
-    if (linear_val <= 0.000000001f) return -90.0f; // Evita log(0) e valori molto bassi
+    if (linear_val <= 0.000000001f) return -90.0f;
     return 20.0f * log10f(linear_val);
 }
 
@@ -69,7 +78,7 @@ instantiate(const LV2_Descriptor* descriptor,
 
     self->samplerate = samplerate;
 
-    // Inizializzazione del logger (come in GUA76)
+    // Inizializzazione del logger
     for (int i = 0; features[i]; ++i) {
         if (!strcmp(features[i]->URI, LV2_LOG__log)) {
             self->log = (LV2_Log_Log*)features[i]->data;
@@ -78,9 +87,15 @@ instantiate(const LV2_Descriptor* descriptor,
     lv2_log_logger_init(&self->logger, NULL, self->log);
 
     // Inizializzazione dello stato dei meter e del filtro RMS
-    self->current_output_rms = -60.0f; // Valore iniziale basso per RMS
-    self->current_gain_reduction = 0.0f; // Nessuna gain reduction all'inizio
-    self->rms_alpha = 1.0f - expf(-1.0f / (self->samplerate * 0.05f)); // Costante di tempo di 50ms per RMS
+    self->current_output_rms = -60.0f;
+    self->current_gain_reduction = 0.0f;
+    self->rms_alpha = 1.0f - expf(-1.0f / (self->samplerate * 0.05f));
+
+    // TODO: Inizializza qui anche le variabili di stato per la compressione (es. detector state)
+    // self->gr_detector_state_M = 0.0f;
+    // self->gr_detector_state_S = 0.0f;
+    // self->current_gain_M = 1.0f;
+    // self->current_gain_S = 1.0f;
 
     return (LV2_Handle)self;
 }
@@ -94,8 +109,8 @@ connect_port(LV2_Handle instance, uint32_t port, void* data_location) {
         case GLA3A_PEAK_REDUCTION:     self->peak_reduction_ptr = (float*)data_location; break;
         case GLA3A_GAIN:               self->gain_ptr = (float*)data_location; break;
         case GLA3A_METER:              self->meter_ptr = (float*)data_location; break;
-        case GLA3A_BYPASS:             self->bypass_ptr = (float*)data_location; break;         // NUOVO
-        case GLA3A_MS_MODE_ACTIVE:     self->ms_mode_active_ptr = (float*)data_location; break; // NUOVO
+        case GLA3A_BYPASS:             self->bypass_ptr = (float*)data_location; break;
+        case GLA3A_MS_MODE_ACTIVE:     self->ms_mode_active_ptr = (float*)data_location; break;
         case GLA3A_OUTPUT_RMS:         self->output_rms_ptr = (float*)data_location; break;
         case GLA3A_GAIN_REDUCTION_METER: self->gain_reduction_meter_ptr = (float*)data_location; break;
         case GLA3A_AUDIO_IN_L:         self->audio_in_l_ptr = (const float*)data_location; break;
@@ -112,6 +127,11 @@ activate(LV2_Handle instance) {
     // Resetta lo stato interno del compressore e dei meter
     self->current_output_rms = -60.0f;
     self->current_gain_reduction = 0.0f;
+    // TODO: Resetta anche le variabili di stato per la compressione qui
+    // self->gr_detector_state_M = 0.0f;
+    // self->gr_detector_state_S = 0.0f;
+    // self->current_gain_M = 1.0f;
+    // self->current_gain_S = 1.0f;
 }
 
 // Funzione di elaborazione audio (run)
@@ -126,81 +146,96 @@ run(LV2_Handle instance, uint32_t sample_count) {
     float* out_r = self->audio_out_r_ptr;
 
     // Valori dei parametri di controllo
-    const float bypass = *self->bypass_ptr;                 // NUOVO
-    const float ms_mode_active = *self->ms_mode_active_ptr; // NUOVO
+    const float bypass = *self->bypass_ptr;
+    const float ms_mode_active = *self->ms_mode_active_ptr;
 
     // --- Logica True Bypass ---
-    // Se il bypass è attivo (valore > 0.5f, poiché è un toggle 0 o 1)
     if (bypass > 0.5f) {
-        // Copia direttamente l'input all'output senza elaborazione
         if (in_l != out_l) { memcpy(out_l, in_l, sizeof(float) * sample_count); }
         if (in_r != out_r) { memcpy(out_r, in_r, sizeof(float) * sample_count); }
 
-        // Aggiorna i meter anche in bypass (mostrando l'input RMS e GR a 0)
         *self->output_rms_ptr = to_db(calculate_rms_level(in_l, sample_count, self->current_output_rms, self->rms_alpha));
         *self->gain_reduction_meter_ptr = 0.0f; // Nessuna gain reduction in bypass
-        return; // Esci dalla funzione, nessuna ulteriore elaborazione
+        return;
     }
 
     // --- Loop di elaborazione audio sample per sample ---
     for (uint32_t i = 0; i < sample_count; ++i) {
-        float mono_in_l = in_l[i];
-        float mono_in_r = in_r[i];
+        float input_l = in_l[i];
+        float input_r = in_r[i];
 
-        float M = 0.0f, S = 0.0f; // Segnali Mid e Side
+        float M = 0.0f, S = 0.0f; // Segnali Mid e Side per l'elaborazione
 
         if (ms_mode_active > 0.5f) {
-            // --- Codifica L/R in M/S ---
+            // --- Codifica L/R in M/S (a monte della compressione) ---
             // M = (Left + Right)
             // S = (Left - Right)
-            M = (mono_in_l + mono_in_r);
-            S = (mono_in_l - mono_in_r);
-            // Nota: La normalizzazione (es. M *= 0.5f; S *= 0.5f;) qui dipende da come il tuo algoritmo GLA3A
-            // è calibrato per i livelli. Per ora, la lasciamo non normalizzata per la massima compatibilità
-            // con l'algoritmo esistente, e la normalizzazione avverrà in decodifica.
+            // Nota: Spesso per M/S si applica una normalizzazione iniziale, es. M*=0.5, S*=0.5
+            // per mantenere i livelli simili, e poi non si normalizza in decodifica.
+            // Qui usiamo la forma standard che normalizza in decodifica.
+            M = (input_l + input_r);
+            S = (input_l - input_r);
         } else {
             // Se la modalità M/S non è attiva, processa i canali Left e Right separatamente.
-            // Per comodità di riutilizzo del codice di compressione, li trattiamo come M e S
-            // che verranno poi decodificati direttamente come L e R.
-            M = mono_in_l;
-            S = mono_in_r;
+            // Per comodità, li trattiamo come "M" e "S" individuali per l'algoritmo di compressione,
+            // che poi verranno scritti direttamente in output_l e output_r.
+            M = input_l;
+            S = input_r;
         }
 
-        // TODO: QUI VA LA TUA LOGICA DI COMPRESSIONE SPECIFICA DEL GLA3A
-        // Applica i controlli (peak_reduction, gain, meter) ai segnali M e S.
-        // Se `ms_mode_active` è attivo, dovrai decidere se applicare la compressione
-        // a M, a S, o a entrambi in modo indipendente.
-        // Se `ms_mode_active` non è attivo, `M` e `S` sono essenzialmente i tuoi canali L e R,
-        // quindi la tua logica di compressione stereo standard andrà qui.
+        // --- APPLICA LA TUA LOGICA DI COMPRESSIONE GLA3A QUI ---
+        // Ora `M` e `S` contengono i segnali da comprimere.
+        // Se `ms_mode_active` è attivo:
+        //    M è il segnale Mid, S è il segnale Side. Applica la compressione a questi due.
+        // Se `ms_mode_active` NON è attivo:
+        //    M è il segnale Left, S è il segnale Right. Applica la compressione a questi due.
 
-        float processed_M = M; // Placeholder: Sostituisci con la logica GLA3A per il canale Mid/Left
-        float processed_S = S; // Placeholder: Sostituisci con la logica GLA3A per il canale Side/Right
+        float processed_M; // Output del tuo compressore per il canale M/Left
+        float processed_S; // Output del tuo compressore per il canale S/Right
 
-        // TODO: Calcola la gain reduction per questo sample.
-        // Questo valore influenzerà il self->current_gain_reduction che aggiorna il meter.
-        // self->current_gain_reduction = ...; // Calcolato dalla tua logica GLA3A
+        // Implementa qui la logica del compressore GLA3A
+        // Esempio (sostituisci con il tuo vero algoritmo):
+        // float peak_reduction_val = *self->peak_reduction_ptr;
+        // float gain_val = *self->gain_ptr;
+        //
+        // // Logica di Gain Reduction per M (ad esempio, basata su un detector di envelope)
+        // float gr_M = calculate_gain_reduction(M, peak_reduction_val, self->gr_detector_state_M, self->samplerate);
+        // processed_M = M * (1.0f - gr_M) * gain_val; // Esempio semplificato
+        //
+        // // Logica di Gain Reduction per S
+        // float gr_S = calculate_gain_reduction(S, peak_reduction_val, self->gr_detector_state_S, self->samplerate);
+        // processed_S = S * (1.0f - gr_S) * gain_val; // Esempio semplificato
+        //
+        // self->current_gain_reduction = (gr_M + gr_S) * 0.5f; // Media per il meter (o scegli il massimo)
 
-        float out_sample_l, out_sample_r;
+
+        // <<< Inserisci la tua logica GLA3A qui per calcolare processed_M e processed_S >>>
+        // Per ora, i valori passano attraverso senza compressione:
+        processed_M = M;
+        processed_S = S;
+        self->current_gain_reduction = 0.0f; // Placeholder, aggiorna questo con il tuo calcolo reale
+
+        // --- Decodifica M/S in L/R (a valle della compressione) ---
+        float output_l, output_r;
         if (ms_mode_active > 0.5f) {
-            // --- Decodifica M/S in L/R ---
-            // Left  = (Mid + Side) / 2
-            // Right = (Mid - Side) / 2
-            out_sample_l = (processed_M + processed_S) * 0.5f;
-            out_sample_r = (processed_M - processed_S) * 0.5f;
+            // Left  = (Mid_processed + Side_processed) / 2
+            // Right = (Mid_processed - Side_processed) / 2
+            output_l = (processed_M + processed_S) * 0.5f;
+            output_r = (processed_M - processed_S) * 0.5f;
         } else {
-            // Se non M/S, M e S erano già i canali L e R elaborati.
-            out_sample_l = processed_M;
-            out_sample_r = processed_S;
+            // Se non M/S, processed_M e processed_S erano già i canali L e R
+            output_l = processed_M;
+            output_r = processed_S;
         }
 
-        out_l[i] = out_sample_l;
-        out_r[i] = out_sample_r;
+        out_l[i] = output_l;
+        out_r[i] = output_r;
     }
 
     // --- Aggiornamento dei valori dei meter ---
-    // Questi valori vengono inviati alla GUI
     *self->output_rms_ptr = to_db(calculate_rms_level(out_l, sample_count, self->current_output_rms, self->rms_alpha));
-    *self->gain_reduction_meter_ptr = self->current_gain_reduction; // Assicurati che questo sia aggiornato dalla tua logica GLA3A
+    // self->current_gain_reduction deve essere aggiornato dalla tua logica di compressione
+    *self->gain_reduction_meter_ptr = self->current_gain_reduction;
 }
 
 // Funzione di pulizia
@@ -211,14 +246,14 @@ cleanup(LV2_Handle instance) {
 
 // Descrittore del plugin
 static const LV2_Descriptor descriptor = {
-    GLA3A_URI,       // URI del plugin
+    GLA3A_URI,
     instantiate,
     connect_port,
     activate,
     run,
-    NULL,            // deactivate (opzionale)
+    NULL, // deactivate
     cleanup,
-    NULL             // extension_data
+    NULL // extension_data
 };
 
 // Punto di ingresso LV2
